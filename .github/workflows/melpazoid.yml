@@ -1,0 +1,24 @@
+name: melpazoid
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Install
+      run: |
+        sudo apt-get update && sudo apt-get install -y emacs
+        git clone https://github.com/riscy/melpazoid.git ~/melpazoid
+    - name: Run
+      env:
+        LOCAL_REPO: ${{ github.workspace }}
+        RECIPE: (md-ts-mode :fetcher github :repo "dnouri/md-ts-mode")
+        EXIST_OK: true
+      run: make -C ~/melpazoid

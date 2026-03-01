@@ -1,0 +1,115 @@
+#+title: md-ts-mode
+#+author: Daniel Nouri
+
+#+html: <a href="https://github.com/dnouri/md-ts-mode/actions/workflows/test.yml"><img alt="Tests" src="https://github.com/dnouri/md-ts-mode/actions/workflows/test.yml/badge.svg"/></a>
+#+html: <a href="https://github.com/dnouri/md-ts-mode/actions/workflows/melpazoid.yml"><img alt="melpazoid" src="https://github.com/dnouri/md-ts-mode/actions/workflows/melpazoid.yml/badge.svg"/></a>
+
+~md-ts-mode~ is a tree-sitter-based major mode for editing Markdown.
+It is derived from ~markdown-ts-mode~ in GNU Emacs 31 and works on
+Emacs 29, 30, and 31.
+
+** Features
+
+- Syntax highlighting for headings (atx and setext), emphasis, strong
+  emphasis, strikethrough (=~~deleted~~=), code spans, links (inline,
+  full reference, collapsed reference, shortcut), images, block
+  quotes, list markers, and indented code blocks.
+- Task list markers (=[ ]=, =[x]=) rendered as checkbox glyphs (☐, ☑).
+- Thematic breaks (=---=, =***=, =___=) rendered as horizontal rules.
+- Pipe tables with bold headers, subdued delimiter rows, and inline
+  markup (emphasis, code, links) fontified inside cells.
+- HTML blocks highlighted with ~font-lock-doc-face~.
+- Fenced code blocks fontified by the corresponding language grammar
+  when available.
+- YAML and TOML front matter fontified when their grammars are
+  available.
+- Hide-markup mode: ~md-ts-toggle-hide-markup~ hides delimiters
+  (=#=, =*=, =~=, brackets, URLs) so only content is visible.
+- Imenu and ~outline-minor-mode~ integration via headings.
+- Custom faces: ~md-ts-heading-1~ through ~md-ts-heading-6~,
+  ~md-ts-setext-heading~, ~md-ts-delimiter~, ~md-ts-list-marker~,
+  ~md-ts-block-quote~, ~md-ts-strikethrough~,
+  ~md-ts-language-keyword~, and ~md-ts-task-list-marker~.
+
+
+** Requirements
+
+- GNU Emacs 29.1 or later, built with tree-sitter support.
+- Tree-sitter grammars: ~markdown~ and ~markdown-inline~ from
+  [[https://github.com/tree-sitter-grammars/tree-sitter-markdown][tree-sitter-markdown]] (version 0.4.1 or compatible).
+
+
+** Installation
+
+*** Install the package
+
+With ~package-vc~ (Emacs 29+):
+
+#+begin_src elisp
+  (package-vc-install "https://github.com/dnouri/md-ts-mode")
+#+end_src
+
+Or clone the repository and add it to ~load-path~:
+
+#+begin_src elisp
+  (add-to-list 'load-path "/path/to/md-ts-mode/")
+  (require 'md-ts-mode)
+#+end_src
+
+The package registers itself in ~auto-mode-alist~ for =.md= files
+and in ~treesit-major-mode-remap-alist~ as a replacement for
+~markdown-mode~.  No further configuration is needed.
+
+*** Install tree-sitter grammars
+
+The package registers grammar recipes in
+~treesit-language-source-alist~, so after loading:
+
+#+begin_example
+  M-x treesit-install-language-grammar RET markdown RET
+  M-x treesit-install-language-grammar RET markdown-inline RET
+#+end_example
+
+If only part of a file is highlighted, one of the grammars is
+probably missing.
+
+
+** Embedded code blocks
+
+Fenced code blocks with a language tag (e.g., =```python=) are
+parsed and fontified by the corresponding language grammar.
+Install the grammar for any language you want highlighted:
+
+#+begin_example
+  M-x treesit-install-language-grammar RET python RET
+#+end_example
+
+The variable ~md-ts-code-block-source-mode-map~ maps language
+symbols to their tree-sitter major modes.  The mode must be
+installed and its grammar available for highlighting to work.
+
+
+** Compatibility
+
+The compatibility shims in ~md-ts-mode.el~ backport Emacs 31
+tree-sitter range infrastructure to Emacs 29 and 30.  This
+includes replacements for ~treesit-range-fn-exclude-children~,
+~treesit-query-range~ (with ~RANGE-FN~ argument),
+~treesit-range-rules~ (with ~:range-fn~ keyword and function-form
+~:embed~), ~treesit-update-ranges~, and
+~treesit--update-ranges-local~.
+
+On Emacs 29, additional shims provide ~treesit-node-children~,
+~derived-mode-add-parents~, and wrappers for C functions whose
+signatures changed in Emacs 30 (~treesit-parser-create~,
+~treesit-parser-list~).
+
+On Emacs 31 all guards are false and no shims are defined.
+
+Tested on Emacs 29.4, 30.1, and development snapshot (31).
+
+
+** Acknowledgments
+
+Based on ~markdown-ts-mode~ from GNU Emacs 31, originally written
+by Rahul Martim Juliato.
