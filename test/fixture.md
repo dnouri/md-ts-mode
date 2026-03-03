@@ -89,3 +89,16 @@ A stray ~tilde here should not leak.
 Into ~this paragraph as strikethrough.
 
 Long line with **bold** and *italic* and `code` and [link](url) and ~~strike~~ scattered throughout to test that face boundaries work across a wide line.
+
+> Excellent data! Let me analyze what we've learned:
+> 
+> **Cold vs Warm harvest costs:**
+> - `css`: 168.6ms cold, 0.3ms warm — the most expensive by far
+> - `javascript`: 90.4ms cold, 0.5ms warm — second most expensive (cc-mode loading)
+> - `python`: 41.7ms cold, 0.4ms warm
+> - `bash`: 27.4ms cold, 0.5ms warm
+> - `ruby`: 10.2ms cold, 0.3ms warm
+> - Others: mostly <10ms
+> 
+> **Key insight: warm harvest is already ~0.3ms** — meaning calling `(funcall mode)` on an already-loaded mode is cheap. The cost is entirely in the initial `require` chain.
+>
