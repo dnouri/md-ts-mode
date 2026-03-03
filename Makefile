@@ -4,7 +4,7 @@ BATCH = $(EMACS) --batch -Q -L .
 SELECTOR ?=
 VERBOSE ?=
 
-.PHONY: test compile lint lint-checkdoc lint-package check check-parens clean help install-hooks
+.PHONY: test compile lint lint-checkdoc lint-package check check-parens clean help install-hooks snapshot
 
 help:
 	@echo "Targets:"
@@ -14,6 +14,7 @@ help:
 	@echo "  make lint-checkdoc  Docstring warnings only"
 	@echo "  make lint-package   MELPA package conventions only"
 	@echo "  make check-parens   Verify balanced parentheses"
+	@echo "  make snapshot       Regenerate test/fixture-faces.eld"
 	@echo "  make check          compile + lint + test (pre-commit)"
 	@echo "  make install-hooks  Set up git pre-commit hook"
 	@echo "  make clean          Remove .elc files"
@@ -79,6 +80,14 @@ check-parens:
 		           (kill-emacs 1)))' 2>&1); \
 	echo "$$OUTPUT" | grep -E "OK$$|FAIL:"; \
 	echo "$$OUTPUT" | grep -q "FAIL:" && exit 1 || true
+
+snapshot:
+	@echo "=== Snapshot ==="
+	@$(BATCH) \
+		--eval '(add-to-list (quote treesit-extra-load-path) (expand-file-name "~/.emacs.d/tree-sitter"))' \
+		-L test \
+		-l md-ts-mode-test \
+		-l scripts/generate-snapshot.el
 
 check: compile lint test
 

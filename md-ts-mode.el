@@ -652,6 +652,28 @@ maps to tree-sitter language `cpp'.")
   :safe #'booleanp
   :group 'md-ts)
 
+(defcustom md-ts-heading-scaling nil
+  "Whether to use variable-height faces for headings.
+When non-nil, the scaling values in `md-ts-heading-scaling-values'
+will be applied to headings of levels one through six respectively."
+  :type 'boolean
+  :initialize #'custom-initialize-default
+  :set (lambda (symbol value)
+         (set-default symbol value)
+         (md-ts-update-heading-faces))
+  :group 'md-ts)
+
+(defcustom md-ts-heading-scaling-values
+  '(2.0 1.7 1.4 1.1 1.0 1.0)
+  "List of scaling values for headings of level one through six.
+Used when `md-ts-heading-scaling' is non-nil."
+  :type '(repeat float)
+  :initialize #'custom-initialize-default
+  :set (lambda (symbol value)
+         (set-default symbol value)
+         (md-ts-update-heading-faces))
+  :group 'md-ts)
+
 ;;; Faces
 
 (defgroup md-ts-faces nil
@@ -660,27 +682,27 @@ maps to tree-sitter language `cpp'.")
   :group 'faces)
 
 (defface md-ts-delimiter '((t (:inherit shadow)))
-  "Face for the # before Markdown headings.")
+  "Face for Markdown structural delimiters.
+Applied to heading markers (#), emphasis delimiters (* and **),
+code backticks, setext underlines, thematic breaks, table
+separators, and other structural markup characters.")
 
-(defface md-ts-heading-1 '((t (:inherit outline-1)))
+(defface md-ts-heading-1 '((t (:inherit outline-1 :weight bold)))
   "Face for first level Markdown headings.")
 
-(defface md-ts-setext-heading '((t (:inherit md-ts-heading-1)))
-  "Face for setext Markdown headings (headings underlined by === or ---).")
-
-(defface md-ts-heading-2 '((t (:inherit outline-2)))
+(defface md-ts-heading-2 '((t (:inherit outline-2 :weight bold)))
   "Face for second level Markdown headings.")
 
-(defface md-ts-heading-3 '((t (:inherit outline-3)))
+(defface md-ts-heading-3 '((t (:inherit outline-3 :weight bold)))
   "Face for third level Markdown headings.")
 
-(defface md-ts-heading-4 '((t (:inherit outline-4)))
+(defface md-ts-heading-4 '((t (:inherit outline-4 :weight bold)))
   "Face for fourth level Markdown headings.")
 
-(defface md-ts-heading-5 '((t (:inherit outline-5)))
+(defface md-ts-heading-5 '((t (:inherit outline-5 :weight bold)))
   "Face for fifth level Markdown headings.")
 
-(defface md-ts-heading-6 '((t (:inherit outline-6)))
+(defface md-ts-heading-6 '((t (:inherit outline-6 :weight bold)))
   "Face for sixth level Markdown headings.")
 
 (defface md-ts-list-marker '((t (:inherit shadow)))
@@ -698,10 +720,26 @@ maps to tree-sitter language `cpp'.")
 (defface md-ts-task-list-marker '((t (:inherit font-lock-builtin-face)))
   "Face for task list markers ([ ] and [x]).")
 
-(defface md-ts-code '((t (:inherit fixed-pitch)))
+(defface md-ts-code '((t (:inherit (fixed-pitch font-lock-constant-face))))
   "Face for inline code, indented code blocks, and fenced code blocks.
-Customize this face to add a contrasting background for code regions,
-for example: (set-face-attribute \\='md-ts-code nil :background \"gray20\").")
+Inherits `fixed-pitch' for a monospace font and
+`font-lock-constant-face' for a distinct foreground color.
+Customize this face to add a contrasting background, for example:
+\(set-face-attribute \\='md-ts-code nil :background \"gray20\").")
+
+(defun md-ts-update-heading-faces ()
+  "Update heading faces according to `md-ts-heading-scaling'.
+When `md-ts-heading-scaling' is non-nil, apply the heights from
+`md-ts-heading-scaling-values' to heading faces 1 through 6.
+Otherwise reset heights to `unspecified' so themes can provide
+their own scaling."
+  (dotimes (num 6)
+    (let* ((face (intern (format "md-ts-heading-%s" (1+ num))))
+           (scale (if md-ts-heading-scaling
+                      (float (nth num md-ts-heading-scaling-values))
+                    'unspecified)))
+      (unless (get face 'saved-face)
+        (set-face-attribute face nil :height scale)))))
 
 ;;; Font-lock
 
@@ -712,8 +750,15 @@ OVERRIDE, START, and END are passed to `treesit-fontify-with-override'."
    (treesit-node-start node) (treesit-node-end node)
    'md-ts-delimiter override start end)
   (when md-ts-hide-markup
-    (put-text-property (treesit-node-start node) (treesit-node-end node)
-                       'invisible 'md-ts--markup)))
+    (let ((hide-end (treesit-node-end node))
+          (type (treesit-node-type node)))
+      ;; For ATX heading markers, also hide the trailing space.
+      ;; For setext underlines, also hide the trailing newline.
+      (when (or (string-prefix-p "atx_h" type)
+                (string-prefix-p "setext_h" type))
+        (setq hide-end (min (1+ hide-end) (point-max))))
+      (put-text-property (treesit-node-start node) hide-end
+                         'invisible 'md-ts--markup))))
 
 (defun md-ts--fontify-thematic-break (node override start end &rest _)
   "Fontify thematic break NODE as a horizontal rule.
@@ -812,7 +857,8 @@ font-lock rule to avoid interfering with embedded language faces."
      (atx_heading (atx_h4_marker)) @md-ts-heading-4
      (atx_heading (atx_h5_marker)) @md-ts-heading-5
      (atx_heading (atx_h6_marker)) @md-ts-heading-6
-     (setext_heading heading_content: (_) @md-ts-setext-heading))
+     (setext_heading heading_content: (_) @md-ts-heading-1 (setext_h1_underline))
+     (setext_heading heading_content: (_) @md-ts-heading-2 (setext_h2_underline)))
 
    :language 'markdown
    :feature 'heading
@@ -844,7 +890,8 @@ font-lock rule to avoid interfering with embedded language faces."
    :override 'prepend
    '((block_quote) @md-ts-block-quote
      (block_quote_marker) @md-ts--fontify-delimiter
-     (block_continuation) @md-ts--fontify-delimiter
+     (block_quote (block_continuation) @md-ts--fontify-delimiter)
+     (block_quote (paragraph (block_continuation) @md-ts--fontify-delimiter))
      (fenced_code_block) @md-ts--fontify-fenced-code-block)
 
    :language 'markdown-inline
@@ -894,39 +941,51 @@ font-lock rule to avoid interfering with embedded language faces."
 (defvar-local md-ts--configured-languages nil
   "Languages whose font-lock and indent have been loaded in this buffer.")
 
+(defvar-local md-ts--unavailable-languages nil
+  "Languages whose mode failed to activate (missing grammars, etc.).")
+
 (defun md-ts--harvest-treesit-configs (mode)
   "Harvest tree-sitter configs from MODE.
-Return a plist with :font-lock, :simple-indent, and :range keys."
-  (with-temp-buffer
-    (funcall mode)
-    (list :font-lock treesit-font-lock-settings
-          :simple-indent treesit-simple-indent-rules
-          :range treesit-range-settings)))
+Return a plist with :font-lock, :simple-indent, and :range keys,
+or nil if MODE fails to activate (e.g. missing grammar dependencies)."
+  (condition-case err
+      (with-temp-buffer
+        (funcall mode)
+        (list :font-lock treesit-font-lock-settings
+              :simple-indent treesit-simple-indent-rules
+              :range treesit-range-settings))
+    (error
+     (message "md-ts-mode: failed to harvest configs from %s: %s"
+              mode (error-message-string err))
+     nil)))
 
 (defun md-ts--add-config-for-mode (language mode)
   "Add font-lock and indent configurations for LANGUAGE from MODE.
 Re-appends `code' feature rules at the end so `md-ts-code' face
-is applied after all embedded language fontification."
+is applied after all embedded language fontification.
+Return non-nil on success, nil if MODE could not be harvested."
   (let ((configs (md-ts--harvest-treesit-configs mode)))
-    (ignore language)
-    ;; Remove existing code-feature rules, append new lang, re-append code.
-    ;; This keeps md-ts-code rules physically last in the settings list.
-    (let ((code-rules (seq-filter (lambda (s) (eq (nth 2 s) 'code))
-                                  treesit-font-lock-settings))
-          (non-code (seq-remove (lambda (s) (eq (nth 2 s) 'code))
-                                treesit-font-lock-settings)))
-      (setq treesit-font-lock-settings
-            (append non-code
-                    (plist-get configs :font-lock)
-                    code-rules)))
-    (setq treesit-simple-indent-rules
-          (append treesit-simple-indent-rules
-                  (plist-get configs :simple-indent)))
-    (setq treesit-range-settings
-          (append treesit-range-settings
-                  (plist-get configs :range)))
-    (setq-local indent-line-function #'treesit-indent)
-    (setq-local indent-region-function #'treesit-indent-region)))
+    (when configs
+      (ignore language)
+      ;; Remove existing code-feature rules, append new lang, re-append code.
+      ;; This keeps md-ts-code rules physically last in the settings list.
+      (let ((code-rules (seq-filter (lambda (s) (eq (nth 2 s) 'code))
+                                    treesit-font-lock-settings))
+            (non-code (seq-remove (lambda (s) (eq (nth 2 s) 'code))
+                                  treesit-font-lock-settings)))
+        (setq treesit-font-lock-settings
+              (append non-code
+                      (plist-get configs :font-lock)
+                      code-rules)))
+      (setq treesit-simple-indent-rules
+            (append treesit-simple-indent-rules
+                    (plist-get configs :simple-indent)))
+      (setq treesit-range-settings
+            (append treesit-range-settings
+                    (plist-get configs :range)))
+      (setq-local indent-line-function #'treesit-indent)
+      (setq-local indent-region-function #'treesit-indent-region)
+      t)))
 
 (defun md-ts--convert-code-block-language (node)
   "Convert NODE to a language symbol for the code block.
@@ -938,12 +997,16 @@ Return nil if no tree-sitter mode is available for the language."
                    lang-string
                  (intern (downcase lang-string)))))
     (let ((mode (alist-get lang md-ts-code-block-source-mode-map)))
-      (if (not (and mode (fboundp mode)))
-          nil
-        (when (not (memq lang md-ts--configured-languages))
-          (md-ts--add-config-for-mode lang mode)
-          (push lang md-ts--configured-languages))
-        lang))))
+      (cond
+       ((not (and mode (fboundp mode))) nil)
+       ((memq lang md-ts--unavailable-languages) nil)
+       ((memq lang md-ts--configured-languages) lang)
+       ((md-ts--add-config-for-mode lang mode)
+        (push lang md-ts--configured-languages)
+        lang)
+       (t
+        (push lang md-ts--unavailable-languages)
+        nil)))))
 
 ;;; Range settings
 

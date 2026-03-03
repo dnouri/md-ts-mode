@@ -89,6 +89,55 @@ NTH selects occurrence (default 1)."
     (should (md-ts-test--has-face text "H5" 'md-ts-heading-5))
     (should (md-ts-test--has-face text "H6" 'md-ts-heading-6))))
 
+(ert-deftest md-ts-test-setext-heading-levels ()
+  "Setext H1 (===) should get `md-ts-heading-1', H2 (---) should get `md-ts-heading-2'."
+  (should (md-ts-test--has-face
+           "Title\n===\n" "Title" 'md-ts-heading-1))
+  (should (md-ts-test--has-face
+           "Title\n---\n" "Title" 'md-ts-heading-2)))
+
+(ert-deftest md-ts-test-heading-bold ()
+  "All heading face specs should include bold weight."
+  (dolist (face '(md-ts-heading-1 md-ts-heading-2 md-ts-heading-3
+                  md-ts-heading-4 md-ts-heading-5 md-ts-heading-6))
+    (let* ((spec (face-default-spec face))
+           (attrs (cadr (assq t spec))))
+      (should (eq (plist-get attrs :weight) 'bold)))))
+
+(ert-deftest md-ts-test-heading-scaling ()
+  "When `md-ts-heading-scaling' is non-nil, heading faces get :height."
+  (let ((md-ts-heading-scaling t))
+    (md-ts-update-heading-faces)
+    (unwind-protect
+        (progn
+          (should (= (face-attribute 'md-ts-heading-1 :height) 2.0))
+          (should (= (face-attribute 'md-ts-heading-2 :height) 1.7))
+          (should (= (face-attribute 'md-ts-heading-6 :height) 1.0)))
+      ;; Reset
+      (let ((md-ts-heading-scaling nil))
+        (md-ts-update-heading-faces)))))
+
+(ert-deftest md-ts-test-heading-scaling-off ()
+  "When `md-ts-heading-scaling' is nil, :height is unspecified.
+This allows themes to provide their own heading heights."
+  (let ((md-ts-heading-scaling nil))
+    (md-ts-update-heading-faces)
+    (should (eq (face-attribute 'md-ts-heading-1 :height) 'unspecified))
+    (should (eq (face-attribute 'md-ts-heading-3 :height) 'unspecified))))
+
+(ert-deftest md-ts-test-heading-scaling-custom-values ()
+  "Custom scaling values should be respected."
+  (let ((md-ts-heading-scaling t)
+        (md-ts-heading-scaling-values '(1.5 1.3 1.2 1.1 1.0 1.0)))
+    (md-ts-update-heading-faces)
+    (unwind-protect
+        (progn
+          (should (= (face-attribute 'md-ts-heading-1 :height) 1.5))
+          (should (= (face-attribute 'md-ts-heading-2 :height) 1.3)))
+      ;; Reset
+      (let ((md-ts-heading-scaling nil))
+        (md-ts-update-heading-faces)))))
+
 (ert-deftest md-ts-test-heading-delimiter ()
   "The # marker should get md-ts-delimiter face."
   (should (md-ts-test--has-face
@@ -127,6 +176,14 @@ NTH selects occurrence (default 1)."
   "Strikethrough text should get `md-ts-strikethrough' face."
   (should (md-ts-test--has-face
            "Normal ~~deleted~~ text.\n" "deleted" 'md-ts-strikethrough)))
+
+(ert-deftest md-ts-test-code-face-inherits-constant ()
+  "The md-ts-code face should inherit font-lock-constant-face for color."
+  (let* ((spec (face-default-spec 'md-ts-code))
+         (attrs (cadr (assq t spec)))
+         (inherit (plist-get attrs :inherit)))
+    (should (and (listp inherit)
+                 (memq 'font-lock-constant-face inherit)))))
 
 (ert-deftest md-ts-test-code-span ()
   "Code span should get `md-ts-code' face."
@@ -219,6 +276,12 @@ NTH selects occurrence (default 1)."
   (should (md-ts-test--has-face
            "```python\nprint('hi')\n```\n" "print" 'md-ts-code)))
 
+(ert-deftest md-ts-test-indented-code-block-no-delimiter ()
+  "Indented code block continuation indent must not get delimiter face."
+  (let ((text "    first line\n    second line\n"))
+    (should (md-ts-test--has-face text "    second" 'md-ts-code))
+    (should-not (md-ts-test--has-face text "    second" 'md-ts-delimiter))))
+
 (ert-deftest md-ts-test-blockquote ()
   "Block quote should get `md-ts-block-quote' face."
   (should (md-ts-test--has-face
@@ -228,6 +291,13 @@ NTH selects occurrence (default 1)."
   "List markers should get `md-ts-list-marker' face."
   (let ((text "- item one\n- item two\n"))
     (should (md-ts-test--has-face text "-" 'md-ts-list-marker))))
+
+(ert-deftest md-ts-test-nested-list-indent-no-delimiter ()
+  "Indentation before nested list items must not get delimiter face.
+The whitespace aligning nested items is structural indentation,
+not a delimiter that should be hidden."
+  (let ((text "1. First\n   1. Nested\n"))
+    (should-not (md-ts-test--has-face text "   1" 'md-ts-delimiter))))
 
 (ert-deftest md-ts-test-task-list-unchecked ()
   "Unchecked task list marker gets `md-ts-task-list-marker' face."
@@ -427,6 +497,14 @@ text must not be hidden — only the fence lines themselves."
   "With `md-ts-hide-markup' non-nil, delimiters get invisible property."
   (let ((md-ts-hide-markup t))
     (should (eq (md-ts-test--invisible-at "# Hello\n" "#")
+                'md-ts--markup))))
+
+(ert-deftest md-ts-test-hide-markup-heading-space ()
+  "With hide-markup, the space after # in headings should also be hidden."
+  (let ((md-ts-hide-markup t))
+    (should (eq (md-ts-test--invisible-at "# Hello\n" " H")
+                'md-ts--markup))
+    (should (eq (md-ts-test--invisible-at "## Hello\n" " H")
                 'md-ts--markup))))
 
 (ert-deftest md-ts-test-hide-markup-off ()
@@ -1181,6 +1259,121 @@ relationship only exists on Emacs 30+."
         (with-current-buffer buf
           (md-ts-mode)
           (should (derived-mode-p 'markdown-mode)))
+      (kill-buffer buf))))
+
+;;; Fixture snapshot helpers
+
+(defun md-ts-test--normalize-face (face)
+  "Normalize FACE for deterministic snapshots.
+nil stays nil.  A bare symbol stays as-is.  A single-element list
+becomes a bare symbol.  A multi-element list is deduplicated and
+sorted alphabetically."
+  (cond
+   ((null face) nil)
+   ((symbolp face) face)
+   ((and (listp face) (= 1 (length face))) (car face))
+   ((listp face)
+    (let ((deduped (seq-uniq face)))
+      (if (= 1 (length deduped))
+          (car deduped)
+        (sort (copy-sequence deduped)
+              (lambda (a b)
+                (string< (symbol-name a) (symbol-name b)))))))
+   (t face)))
+
+(defun md-ts-test--face-spans (buffer)
+  "Extract face spans from BUFFER as a list of (TEXT FACE) entries.
+Contiguous characters with the same normalized face are merged.
+Consecutive nil-face spans are collapsed into one."
+  (with-current-buffer buffer
+    (let ((spans nil)
+          (pos (point-min))
+          (max (point-max)))
+      (while (< pos max)
+        (let* ((raw-face (get-text-property pos 'face))
+               (face (md-ts-test--normalize-face raw-face))
+               (next (next-single-property-change pos 'face nil max))
+               (text (buffer-substring-no-properties pos next)))
+          ;; Merge with previous span if same face
+          (if (and spans (equal face (cadar spans)))
+              (setcar (car spans) (concat (caar spans) text))
+            (push (list text face) spans))
+          (setq pos next)))
+      (nreverse spans))))
+
+(defun md-ts-test--test-dir ()
+  "Return the test/ directory, resolved from `md-ts-mode' source location."
+  (let ((mode-file (locate-library "md-ts-mode")))
+    (if mode-file
+        (expand-file-name "test/"
+                          (file-name-directory mode-file))
+      ;; Fallback: assume cwd is the project root
+      (expand-file-name "test/" default-directory))))
+
+(defun md-ts-test--fixture-path ()
+  "Return absolute path to test/fixture.md."
+  (expand-file-name "fixture.md" (md-ts-test--test-dir)))
+
+(defun md-ts-test--snapshot-path ()
+  "Return absolute path to test/fixture-faces.eld."
+  (expand-file-name "fixture-faces.eld" (md-ts-test--test-dir)))
+
+(defun md-ts-test--visible-path ()
+  "Return absolute path to test/fixture-visible.txt."
+  (expand-file-name "fixture-visible.txt" (md-ts-test--test-dir)))
+
+(defun md-ts-test--fontify-fixture ()
+  "Load test/fixture.md, fontify it, return face spans.
+Returns a list of (TEXT FACE) entries."
+  (let ((buf (generate-new-buffer " *md-ts-fixture*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (insert-file-contents (md-ts-test--fixture-path))
+            (md-ts-mode)
+            (font-lock-ensure))
+          (md-ts-test--face-spans buf))
+      (kill-buffer buf))))
+
+;;; Fixture snapshot test
+
+(ert-deftest md-ts-test-fixture-snapshot ()
+  "Fontified fixture.md must match the recorded face snapshot.
+Run `make snapshot' to regenerate test/fixture-faces.eld after
+intentional changes."
+  (let* ((snapshot-path (md-ts-test--snapshot-path))
+         (expected (with-temp-buffer
+                     (insert-file-contents snapshot-path)
+                     (read (current-buffer))))
+         (actual (md-ts-test--fontify-fixture)))
+    (should (equal actual expected))))
+
+(ert-deftest md-ts-test-fixture-visible ()
+  "With hide-markup, visible text of fixture.md must match expected.
+Fontifies fixture.md with `md-ts-hide-markup' enabled, extracts
+only the characters that are not invisible, and compares against
+test/fixture-visible.txt."
+  (let* ((md-ts-hide-markup t)
+         (buf (generate-new-buffer " *md-ts-visible*")))
+    (unwind-protect
+        (let (actual expected)
+          (with-current-buffer buf
+            (insert-file-contents (md-ts-test--fixture-path))
+            (md-ts-mode)
+            (font-lock-ensure)
+            (let ((parts nil)
+                  (pos (point-min))
+                  (max (point-max)))
+              (while (< pos max)
+                (unless (get-text-property pos 'invisible)
+                  (push (buffer-substring-no-properties pos (1+ pos))
+                        parts))
+                (setq pos (1+ pos)))
+              (setq actual (apply #'concat (nreverse parts)))))
+          (setq expected (with-temp-buffer
+                           (insert-file-contents (md-ts-test--visible-path))
+                           (buffer-string)))
+          (should (string= actual expected)))
       (kill-buffer buf))))
 
 ;;; Grammar recipe tests
