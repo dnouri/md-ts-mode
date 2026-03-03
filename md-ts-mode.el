@@ -896,8 +896,8 @@ font-lock rule to avoid interfering with embedded language faces."
    :override 'prepend
    '((block_quote) @md-ts-block-quote
      (block_quote_marker) @md-ts--fontify-delimiter
-     (block_quote (block_continuation) @md-ts--fontify-delimiter)
-     (block_quote (paragraph (block_continuation) @md-ts--fontify-delimiter))
+     ((block_continuation) @md-ts--fontify-delimiter
+      (:match "^>" @md-ts--fontify-delimiter))
      (fenced_code_block) @md-ts--fontify-fenced-code-block)
 
    :language 'markdown-inline

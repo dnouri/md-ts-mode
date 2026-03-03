@@ -89,3 +89,9 @@ A stray ~tilde here should not leak.
 Into ~this paragraph as strikethrough.
 
 Long line with **bold** and *italic* and `code` and [link](url) and ~~strike~~ scattered throughout to test that face boundaries work across a wide line.
+
+> Summary:
+>
+> - `code`: description
+> - **bold**: description
+>

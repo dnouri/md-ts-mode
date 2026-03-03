@@ -287,6 +287,22 @@ This allows themes to provide their own heading heights."
   (should (md-ts-test--has-face
            "> quoted\n" "quoted" 'md-ts-block-quote)))
 
+(ert-deftest md-ts-test-blockquote-continuation-in-list ()
+  "Block continuation `> ' inside a list within a blockquote is a delimiter.
+Regression test: the old tree-sitter query only matched
+block_continuation as a direct child of block_quote or paragraph,
+missing continuations inside list items."
+  (let ((text "> - item\n> - other\n"))
+    (should (md-ts-test--has-face text ">" 'md-ts-delimiter 2))))
+
+(ert-deftest md-ts-test-list-continuation-indent-not-delimiter ()
+  "List continuation indent (no `>') must not get delimiter face.
+When a list item contains a blockquote, the list's own indentation
+produces block_continuation nodes that are pure whitespace.  The
+`:match \"^>\"' filter must exclude these."
+  (let ((text "- item\n  > quoted\n"))
+    (should-not (md-ts-test--has-face text "  >" 'md-ts-delimiter))))
+
 (ert-deftest md-ts-test-list-marker ()
   "List markers should get `md-ts-list-marker' face."
   (let ((text "- item one\n- item two\n"))
