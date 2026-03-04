@@ -342,6 +342,38 @@ BEG, END, OFFSET, and RANGE-FN are passed through."
                 (md-ts--treesit-query-range
                  parser query beg end offset range-fn)))))
 
+;; WORKAROUND: tree-sitter < 0.25.0 integer underflow in
+;; `length_sub'/`point_sub'.  After an edit outside a local parser's
+;; included range, unsigned subtraction underflows, corrupting point
+;; fields and making incremental reparse silently produce zero query
+;; matches.  Fixed upstream by commit f3d50f27 (ts 0.25.0, 2025-01-31).
+;;
+;; Workaround: replace the parser with a fresh one so
+;; `ts_parser_parse' does a full (non-incremental) reparse.
+;;
+;; REMOVAL: once tree-sitter >= 0.25.0 can be assumed, delete this
+;; function and its two call-sites (in
+;; `md-ts--treesit--update-ranges-local' and
+;; `md-ts--refresh-local-parsers').
+(defun md-ts--recreate-local-parser (ov old-parser)
+  "Delete OLD-PARSER on OV and create a fresh replacement.
+Return the new parser, or nil if creation fails."
+  (let ((lang (treesit-parser-language old-parser))
+        (embed-level
+         (when (fboundp 'treesit-parser-embed-level)
+           (funcall (intern "treesit-parser-embed-level") old-parser))))
+    (treesit-parser-delete old-parser)
+    (let ((new-parser
+           (condition-case nil
+               (md-ts--parser-create lang nil t 'embedded)
+             (treesit-load-language-error nil))))
+      (when new-parser
+        (when embed-level
+          (funcall (intern "treesit-parser-set-embed-level")
+                   new-parser embed-level))
+        (overlay-put ov 'treesit-parser new-parser))
+      new-parser)))
+
 (defun md-ts--treesit--update-ranges-local
     (query embedded-lang modified-tick &optional beg end offset range-fn)
   "Update ranges for local parsers between BEG and END.
@@ -365,25 +397,13 @@ OFFSET, and RANGE-FN control overlay timestamps and range computation."
                                  (parser-lang (treesit-parser-language
                                                embedded-parser)))
                        (when (eq parser-lang lang)
-                         ;; WORKAROUND: tree-sitter integer underflow
-                         ;; in length_sub/point_sub (fixed in ts 0.25.0
-                         ;; by commit f3d50f27).  See the long comment
-                         ;; at `md-ts--refresh-local-parsers' below
-                         ;; for full details.  Remove this block once
-                         ;; tree-sitter >= 0.25.0 can be assumed.
                          (let ((ov-tick (overlay-get
                                          ov
                                          'treesit-parser-ov-timestamp)))
                            (when (not (eql ov-tick modified-tick))
-                             (treesit-parser-delete embedded-parser)
                              (setq embedded-parser
-                                   (condition-case nil
-                                       (md-ts--parser-create
-                                        lang nil t 'embedded)
-                                     (treesit-load-language-error nil)))
-                             (when embedded-parser
-                               (overlay-put ov 'treesit-parser
-                                            embedded-parser))))
+                                   (md-ts--recreate-local-parser
+                                    ov embedded-parser))))
                          (when embedded-parser
                            (treesit-parser-set-included-ranges
                             embedded-parser `((,beg . ,end)))
@@ -467,88 +487,29 @@ If BEG and END are non-nil, only update ranges in that region."
     (fset (car pair) (symbol-function (cdr pair))))
   (setq md-ts--range-shims-installed t))
 
-;; WORKAROUND: tree-sitter < 0.25.0 integer underflow
-;;
-;; tree-sitter's `length_sub' and `point_sub' (in length.h / point.h)
-;; perform unsigned subtraction without underflow protection.  Emacs
-;; triggers this because:
-;;
-;;   1. `treesit_make_ts_ranges' passes {0,0} dummy TSPoint values in
-;;      the TSRange structs (it only fills in byte positions).
-;;
-;;   2. `treesit_record_change' calls `ts_tree_edit' on ALL parsers in
-;;      the buffer — including local parsers whose included ranges do
-;;      not cover the edit — using {1,0} dummy TSPoints for the edit.
-;;
-;;   3. Inside `ts_tree_edit', range point adjustment computes e.g.
-;;      point_sub({0,0}, {1,0}), which underflows column to UINT32_MAX.
-;;
-;;   4. The corrupted point propagates into subtree sizes computed by
-;;      `ts_lexer_finish' (parser.c), making the incremental reparse
-;;      produce a tree whose query cursor traversal from the root node
-;;      silently returns zero matches — even though the tree structure
-;;      is correct (querying child nodes individually still works).
-;;
-;; Fixed upstream by commit f3d50f27 ("add saturating subtraction to
-;; prevent integer underflow", 2024-12-25), first released in
-;; tree-sitter 0.25.0 (2025-01-31).
-;;
-;; Workaround: delete the old parser and create a fresh one whenever
-;; the buffer has been modified since the last range update.  A fresh
-;; parser has no old tree, so `ts_parser_parse(parser, NULL, input)'
-;; does a full (non-incremental) reparse that never hits the corrupted
-;; point arithmetic.  Cost: ~35µs per parser recreation; with
-;; jit-lock's windowed fontification the total overhead is ~2–3ms
-;; per edit regardless of document size.
-;;
-;; REMOVAL: once tree-sitter >= 0.25.0 can be assumed (i.e. no
-;; supported platform ships 0.22–0.24), delete:
-;;   - this `unless' block (the Emacs 31+ advice)
-;;   - the "WORKAROUND" block in `md-ts--treesit--update-ranges-local'
-;;   - the two streaming tests can stay as regression guards
-;;
-;; On Emacs 31+, the native `treesit--update-ranges-local' is used
-;; (our shims are not installed).  Its function signature differs
-;; across Emacs versions, so rather than replacing it, we advise
-;; `treesit-update-ranges' to recreate stale parsers BEFORE the native
-;; function runs.  It must be :before because the native function
-;; stamps overlays with the current tick — by :after time the
-;; staleness check would always see a matching tick.
-;;
-;; Guard: when shims ARE installed (Emacs 29/30), the workaround lives
-;; inside `md-ts--treesit--update-ranges-local' and this advice is not
-;; needed.  We test `md-ts--range-shims-installed' (not `fboundp')
-;; because the shims define all the same symbols.
+;; On Emacs 31+ the native `treesit--update-ranges-local' is used
+;; (our shims are not installed), so the workaround from
+;; `md-ts--recreate-local-parser' must be applied via :before advice
+;; on `treesit-update-ranges'.  It must be :before because the native
+;; function stamps overlays with the current tick.
 (unless md-ts--range-shims-installed
   (defun md-ts--refresh-local-parsers (&optional beg end)
     "Replace local parsers whose buffer was modified since last update.
-Workaround for tree-sitter < 0.25.0 integer underflow in
-`length_sub'/`point_sub' — see long comment above for details.
+Workaround for tree-sitter < 0.25.0 integer underflow — see
+`md-ts--recreate-local-parser' for details.
 Must run as :before advice on `treesit-update-ranges'."
     (let ((tick (buffer-chars-modified-tick))
           (beg (or beg (point-min)))
           (end (or end (point-max))))
       (dolist (ov (overlays-in beg end))
         (when-let* ((old-parser (overlay-get ov 'treesit-parser))
-                    (lang (treesit-parser-language old-parser))
+                    ((treesit-parser-language old-parser))
                     (ov-tick (overlay-get ov 'treesit-parser-ov-timestamp)))
           (when (not (eql ov-tick tick))
-            (let ((embed-level
-                   (when (fboundp 'treesit-parser-embed-level)
-                     (funcall (intern "treesit-parser-embed-level")
-                              old-parser))))
-              (treesit-parser-delete old-parser)
-              (let ((new-parser
-                     (condition-case nil
-                         (treesit-parser-create lang nil t 'embedded)
-                       (treesit-load-language-error nil))))
-                (when new-parser
-                  (when embed-level
-                    (funcall (intern "treesit-parser-set-embed-level")
-                             new-parser embed-level))
-                  (treesit-parser-set-included-ranges
-                   new-parser `((,(overlay-start ov) . ,(overlay-end ov))))
-                  (overlay-put ov 'treesit-parser new-parser)))))))))
+            (when-let* ((new-parser
+                         (md-ts--recreate-local-parser ov old-parser)))
+              (treesit-parser-set-included-ranges
+               new-parser `((,(overlay-start ov) . ,(overlay-end ov))))))))))
   (advice-add 'treesit-update-ranges :before
               'md-ts--refresh-local-parsers))
 

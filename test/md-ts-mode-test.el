@@ -1351,32 +1351,49 @@ Returns a list of (TEXT FACE) entries."
           (md-ts-test--face-spans buf))
       (kill-buffer buf))))
 
-(defun md-ts-test--fontify-fixture-streamed ()
-  "Like `md-ts-test--fontify-fixture', but insert line by line.
-Simulates streaming (e.g. an LLM writing into the buffer):
-activates `md-ts-mode', then inserts each line of fixture.md and
-calls `font-lock-ensure' after every insertion.  Returns the same
-kind of (TEXT FACE) span list as the batch variant."
+(defun md-ts-test--setup-fixture-streamed ()
+  "Create a buffer with fixture.md inserted line by line.
+Activates `md-ts-mode', then inserts each line and calls
+`font-lock-ensure' after every insertion.  Returns the live
+buffer — caller must kill it."
   (let ((buf (generate-new-buffer " *md-ts-fixture-stream*"))
         (lines (with-temp-buffer
                  (insert-file-contents (md-ts-test--fixture-path))
                  (split-string (buffer-string) "\n"))))
+    (with-current-buffer buf
+      (md-ts-mode)
+      (dolist (line lines)
+        (goto-char (point-max))
+        (insert line "\n")
+        (font-lock-ensure))
+      ;; split-string + rejoin adds a trailing newline; remove it
+      ;; so the buffer content matches insert-file-contents exactly.
+      (goto-char (point-max))
+      (when (eq (char-before) ?\n)
+        (delete-char -1))
+      (font-lock-ensure))
+    buf))
+
+(defun md-ts-test--fontify-fixture-streamed ()
+  "Like `md-ts-test--fontify-fixture', but insert line by line.
+Simulates streaming (e.g. an LLM writing into the buffer).
+Returns the same kind of (TEXT FACE) span list as the batch variant."
+  (let ((buf (md-ts-test--setup-fixture-streamed)))
     (unwind-protect
-        (progn
-          (with-current-buffer buf
-            (md-ts-mode)
-            (dolist (line lines)
-              (goto-char (point-max))
-              (insert line "\n")
-              (font-lock-ensure))
-            ;; split-string + rejoin adds a trailing newline; remove it
-            ;; so the buffer content matches insert-file-contents exactly.
-            (goto-char (point-max))
-            (when (eq (char-before) ?\n)
-              (delete-char -1))
-            (font-lock-ensure))
-          (md-ts-test--face-spans buf))
+        (md-ts-test--face-spans buf)
       (kill-buffer buf))))
+
+(defun md-ts-test--visible-text (buf)
+  "Extract visible text from BUF, skipping invisible characters."
+  (with-current-buffer buf
+    (let ((parts nil)
+          (pos (point-min))
+          (max (point-max)))
+      (while (< pos max)
+        (unless (get-text-property pos 'invisible)
+          (push (buffer-substring-no-properties pos (1+ pos)) parts))
+        (setq pos (1+ pos)))
+      (apply #'concat (nreverse parts)))))
 
 ;;; Fixture snapshot test
 
@@ -1403,16 +1420,8 @@ test/fixture-visible.txt."
           (with-current-buffer buf
             (insert-file-contents (md-ts-test--fixture-path))
             (md-ts-mode)
-            (font-lock-ensure)
-            (let ((parts nil)
-                  (pos (point-min))
-                  (max (point-max)))
-              (while (< pos max)
-                (unless (get-text-property pos 'invisible)
-                  (push (buffer-substring-no-properties pos (1+ pos))
-                        parts))
-                (setq pos (1+ pos)))
-              (setq actual (apply #'concat (nreverse parts)))))
+            (font-lock-ensure))
+          (setq actual (md-ts-test--visible-text buf))
           (setq expected (with-temp-buffer
                            (insert-file-contents (md-ts-test--visible-path))
                            (buffer-string)))
@@ -1422,11 +1431,8 @@ test/fixture-visible.txt."
 ;;; Streamed (line-by-line) fixture tests
 ;;
 ;; These tests guard against a tree-sitter < 0.25.0 integer underflow
-;; bug that causes local (per-paragraph) parsers to silently return
-;; zero query matches after incremental reparse.  The workaround is
-;; parser recreation in `md-ts--treesit--update-ranges-local' (Emacs
-;; 29/30) and `md-ts--refresh-local-parsers' (Emacs 31+).
-;; See the long comment at `md-ts--refresh-local-parsers' for details.
+;; bug that causes local parsers to silently produce zero query matches
+;; after incremental reparse.  See `md-ts--recreate-local-parser'.
 
 (ert-deftest md-ts-test-fixture-snapshot-streamed ()
   "Streaming line-by-line must produce the same faces as batch.
@@ -1445,35 +1451,12 @@ face snapshot used by `md-ts-test-fixture-snapshot'."
 Like `md-ts-test-fixture-visible' but inserts fixture.md one line
 at a time to simulate streaming output."
   (let* ((md-ts-hide-markup t)
-         (buf (generate-new-buffer " *md-ts-visible-stream*"))
-         (lines (with-temp-buffer
-                  (insert-file-contents (md-ts-test--fixture-path))
-                  (split-string (buffer-string) "\n"))))
+         (buf (md-ts-test--setup-fixture-streamed)))
     (unwind-protect
-        (let (actual expected)
-          (with-current-buffer buf
-            (md-ts-mode)
-            (dolist (line lines)
-              (goto-char (point-max))
-              (insert line "\n")
-              (font-lock-ensure))
-            ;; Remove trailing newline added by split-string rejoin
-            (goto-char (point-max))
-            (when (eq (char-before) ?\n)
-              (delete-char -1))
-            (font-lock-ensure)
-            (let ((parts nil)
-                  (pos (point-min))
-                  (max (point-max)))
-              (while (< pos max)
-                (unless (get-text-property pos 'invisible)
-                  (push (buffer-substring-no-properties pos (1+ pos))
-                        parts))
-                (setq pos (1+ pos)))
-              (setq actual (apply #'concat (nreverse parts)))))
-          (setq expected (with-temp-buffer
-                           (insert-file-contents (md-ts-test--visible-path))
-                           (buffer-string)))
+        (let ((actual (md-ts-test--visible-text buf))
+              (expected (with-temp-buffer
+                          (insert-file-contents (md-ts-test--visible-path))
+                          (buffer-string))))
           (should (string= actual expected)))
       (kill-buffer buf))))
 
