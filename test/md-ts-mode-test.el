@@ -1132,6 +1132,23 @@ Additional rules appear when html/yaml/toml grammars are installed."
             (should (eq t (nth 2 code-rule)))))
       (kill-buffer buf))))
 
+(ert-deftest md-ts-test-harvest-filters-function-range-settings ()
+  "Harvested configs keep query-based range settings, drop function-based."
+  (let ((treesit-range-settings nil)
+        (treesit-font-lock-settings nil)
+        (treesit-simple-indent-rules nil)
+        ;; 5-element tuple: (QUERY LANGUAGE LOCAL OFFSET RANGE-FN)
+        (query-setting '("(query)" c nil nil nil))
+        (fn-setting (list #'ignore nil nil nil nil)))
+    (cl-letf (((symbol-function 'md-ts--harvest-treesit-configs)
+               (lambda (_mode)
+                 (list :font-lock nil
+                       :simple-indent nil
+                       :range (list query-setting fn-setting)))))
+      (md-ts--add-config-for-mode 'c 'c-ts-mode)
+      (should (equal (length treesit-range-settings) 1))
+      (should (equal (car treesit-range-settings) query-setting)))))
+
 ;;; Emacs 29 compat shim tests
 
 (ert-deftest md-ts-test-node-children-shim ()
