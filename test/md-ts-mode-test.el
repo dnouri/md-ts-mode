@@ -1351,6 +1351,33 @@ Returns a list of (TEXT FACE) entries."
           (md-ts-test--face-spans buf))
       (kill-buffer buf))))
 
+(defun md-ts-test--fontify-fixture-streamed ()
+  "Like `md-ts-test--fontify-fixture', but insert line by line.
+Simulates streaming (e.g. an LLM writing into the buffer):
+activates `md-ts-mode', then inserts each line of fixture.md and
+calls `font-lock-ensure' after every insertion.  Returns the same
+kind of (TEXT FACE) span list as the batch variant."
+  (let ((buf (generate-new-buffer " *md-ts-fixture-stream*"))
+        (lines (with-temp-buffer
+                 (insert-file-contents (md-ts-test--fixture-path))
+                 (split-string (buffer-string) "\n"))))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (md-ts-mode)
+            (dolist (line lines)
+              (goto-char (point-max))
+              (insert line "\n")
+              (font-lock-ensure))
+            ;; split-string + rejoin adds a trailing newline; remove it
+            ;; so the buffer content matches insert-file-contents exactly.
+            (goto-char (point-max))
+            (when (eq (char-before) ?\n)
+              (delete-char -1))
+            (font-lock-ensure))
+          (md-ts-test--face-spans buf))
+      (kill-buffer buf))))
+
 ;;; Fixture snapshot test
 
 (ert-deftest md-ts-test-fixture-snapshot ()
@@ -1376,6 +1403,64 @@ test/fixture-visible.txt."
           (with-current-buffer buf
             (insert-file-contents (md-ts-test--fixture-path))
             (md-ts-mode)
+            (font-lock-ensure)
+            (let ((parts nil)
+                  (pos (point-min))
+                  (max (point-max)))
+              (while (< pos max)
+                (unless (get-text-property pos 'invisible)
+                  (push (buffer-substring-no-properties pos (1+ pos))
+                        parts))
+                (setq pos (1+ pos)))
+              (setq actual (apply #'concat (nreverse parts)))))
+          (setq expected (with-temp-buffer
+                           (insert-file-contents (md-ts-test--visible-path))
+                           (buffer-string)))
+          (should (string= actual expected)))
+      (kill-buffer buf))))
+
+;;; Streamed (line-by-line) fixture tests
+;;
+;; These tests guard against a tree-sitter < 0.25.0 integer underflow
+;; bug that causes local (per-paragraph) parsers to silently return
+;; zero query matches after incremental reparse.  The workaround is
+;; parser recreation in `md-ts--treesit--update-ranges-local' (Emacs
+;; 29/30) and `md-ts--refresh-local-parsers' (Emacs 31+).
+;; See the long comment at `md-ts--refresh-local-parsers' for details.
+
+(ert-deftest md-ts-test-fixture-snapshot-streamed ()
+  "Streaming line-by-line must produce the same faces as batch.
+Inserts fixture.md one line at a time with `font-lock-ensure'
+after each insertion, then compares against the same recorded
+face snapshot used by `md-ts-test-fixture-snapshot'."
+  (let* ((snapshot-path (md-ts-test--snapshot-path))
+         (expected (with-temp-buffer
+                     (insert-file-contents snapshot-path)
+                     (read (current-buffer))))
+         (actual (md-ts-test--fontify-fixture-streamed)))
+    (should (equal actual expected))))
+
+(ert-deftest md-ts-test-fixture-visible-streamed ()
+  "Streaming line-by-line with hide-markup must match expected visible text.
+Like `md-ts-test-fixture-visible' but inserts fixture.md one line
+at a time to simulate streaming output."
+  (let* ((md-ts-hide-markup t)
+         (buf (generate-new-buffer " *md-ts-visible-stream*"))
+         (lines (with-temp-buffer
+                  (insert-file-contents (md-ts-test--fixture-path))
+                  (split-string (buffer-string) "\n"))))
+    (unwind-protect
+        (let (actual expected)
+          (with-current-buffer buf
+            (md-ts-mode)
+            (dolist (line lines)
+              (goto-char (point-max))
+              (insert line "\n")
+              (font-lock-ensure))
+            ;; Remove trailing newline added by split-string rejoin
+            (goto-char (point-max))
+            (when (eq (char-before) ?\n)
+              (delete-char -1))
             (font-lock-ensure)
             (let ((parts nil)
                   (pos (point-min))
