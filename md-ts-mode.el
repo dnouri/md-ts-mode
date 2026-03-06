@@ -784,7 +784,7 @@ separators, and other structural markup characters.")
   "Face for Markdown block quotes.")
 
 (defface md-ts-strikethrough '((t (:strike-through t)))
-  "Face for Markdown strikethrough text (~~deleted~~).")
+  "Face for Markdown strikethrough text.")
 
 (defface md-ts-language-keyword '((t (:inherit font-lock-keyword-face)))
   "Face for the language keyword for Markdown code blocks.")

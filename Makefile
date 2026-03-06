@@ -26,6 +26,7 @@ test: compile
 		--eval '(add-to-list (quote treesit-extra-load-path) (expand-file-name "~/.emacs.d/tree-sitter"))' \
 		-L test \
 		-l md-ts-mode-test \
+		--eval '(load (expand-file-name "test/md-ts-mode-ert-font-lock.el") nil t)' \
 		$(if $(SELECTOR),--eval '(ert-run-tests-batch-and-exit "$(SELECTOR)")',-f ert-run-tests-batch-and-exit) \
 		>$$OUTPUT 2>&1; \
 	STATUS=$$?; \
