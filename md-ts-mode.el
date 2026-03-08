@@ -1250,12 +1250,5 @@ VALUE non-nil hides markup, nil shows it."
       (md-ts-mode)
     (fundamental-mode)))
 
-;;;###autoload
-(add-to-list 'auto-mode-alist '("\\.md\\'" . md-ts-mode-maybe))
-;;;###autoload
-(when (boundp 'treesit-major-mode-remap-alist)
-  (add-to-list 'treesit-major-mode-remap-alist
-               '(markdown-mode . md-ts-mode)))
-
 (provide 'md-ts-mode)
 ;;; md-ts-mode.el ends here

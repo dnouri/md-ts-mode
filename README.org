@@ -56,9 +56,11 @@ Or clone the repository and add it to ~load-path~:
   (require 'md-ts-mode)
 #+end_src
 
-The package registers itself in ~auto-mode-alist~ for =.md= files
-and in ~treesit-major-mode-remap-alist~ as a replacement for
-~markdown-mode~.  No further configuration is needed.
+Loading the package defines ~md-ts-mode~ and registers its grammar
+recipes, but it does not change how =.md= files or ~markdown-mode~ are
+chosen globally.  Use ~M-x md-ts-mode~ in a buffer, or add your own
+explicit file-association/remap settings in your init file if you want
+~md-ts-mode~ to handle Markdown globally.
 
 *** Install tree-sitter grammars
 
