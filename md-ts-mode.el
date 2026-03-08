@@ -1250,5 +1250,22 @@ VALUE non-nil hides markup, nil shows it."
       (md-ts-mode)
     (fundamental-mode)))
 
+;;;###autoload
+(defun md-ts-mode-enable-global ()
+  "Explicitly prefer `md-ts-mode' for Markdown buffers globally.
+
+This is safe to call from user init files and is idempotent.
+It adds a `\\.md\\' entry to `auto-mode-alist', remaps
+`markdown-mode' through `major-mode-remap-alist', and, when the
+built-in `markdown-ts-mode' is available, remaps that mode too."
+  ;; Emacs 31 routes .md files through `markdown-ts-mode-maybe', so a
+  ;; remap alone would not change plain file visits.
+  (add-to-list 'auto-mode-alist '("\\.md\\'" . md-ts-mode-maybe))
+  (add-to-list 'major-mode-remap-alist '(markdown-mode . md-ts-mode))
+  (when (or (fboundp 'markdown-ts-mode)
+            (locate-library "markdown-ts-mode"))
+    (add-to-list 'major-mode-remap-alist
+                 '(markdown-ts-mode . md-ts-mode))))
+
 (provide 'md-ts-mode)
 ;;; md-ts-mode.el ends here
