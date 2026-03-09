@@ -72,7 +72,203 @@ NTH selects occurrence (default 1)."
           (get-text-property (match-beginning 0) 'invisible))
       (kill-buffer buf))))
 
+(defconst md-ts-test--repo-root
+  (file-name-directory
+   (directory-file-name
+    (file-name-directory (or load-file-name buffer-file-name))))
+  "Absolute path to the md-ts-mode checkout under test.")
+
+(defconst md-ts-test--result-marker "MD-TS-TEST-RESULT:"
+  "Marker that precedes batch-test result output.")
+
+(defun md-ts-test--batch-result-princ-form ()
+  "Return an Elisp form string that prints the batch result marker."
+  (format "(princ %S)" (format "\n%s\n" md-ts-test--result-marker)))
+
+(defun md-ts-test--read-batch-emacs-result (expression)
+  "Evaluate EXPRESSION in a fresh batch Emacs and read its printed result."
+  (let* ((emacs (expand-file-name invocation-name invocation-directory))
+         (repo-root md-ts-test--repo-root)
+         (output-buffer (generate-new-buffer " *md-ts-batch-emacs*"))
+         (exit-code (call-process emacs nil output-buffer nil
+                                  "--batch" "-Q" "-L" repo-root
+                                  "--eval" "(setq load-prefer-newer t)"
+                                  "--eval" expression)))
+    (unwind-protect
+        (progn
+          (unless (eq 0 exit-code)
+            (error "Batch Emacs exited with %s:\n%s"
+                   exit-code
+                   (with-current-buffer output-buffer
+                     (buffer-string))))
+          (with-current-buffer output-buffer
+            (goto-char (point-min))
+            (unless (search-forward md-ts-test--result-marker nil t)
+              (error "Batch Emacs did not print a result marker: %s"
+                     (buffer-string)))
+            (forward-line 1)
+            (read (current-buffer))))
+      (kill-buffer output-buffer))))
+
 ;;; Font-lock correctness tests
+
+(ert-deftest md-ts-test-require-leaves-global-markdown-settings-alone ()
+  "Requiring `md-ts-mode' must not mutate global Markdown mode selection."
+  (let* ((expression
+          (mapconcat
+           #'identity
+           `("(progn"
+             "  (defvar major-mode-remap-alist nil)"
+             "  (defvar treesit-major-mode-remap-alist nil)"
+             "  (let ((before-auto (copy-tree auto-mode-alist))"
+             "        (before-major-remap (copy-tree major-mode-remap-alist))"
+             "        (before-treesit-remap (copy-tree treesit-major-mode-remap-alist)))"
+             "    (require 'md-ts-mode)"
+             ,(md-ts-test--batch-result-princ-form)
+             "    (prin1 (list"
+             "            :auto-unchanged (equal before-auto auto-mode-alist)"
+             "            :major-remap-unchanged (equal before-major-remap major-mode-remap-alist)"
+             "            :treesit-remap-unchanged (equal before-treesit-remap treesit-major-mode-remap-alist)"
+             "            :md-mode-defined (fboundp 'md-ts-mode)"
+             "            :md-mode-maybe-defined (fboundp 'md-ts-mode-maybe)))))")
+           " "))
+         (result (md-ts-test--read-batch-emacs-result expression)))
+    (should (eq t (plist-get result :auto-unchanged)))
+    (should (eq t (plist-get result :major-remap-unchanged)))
+    (should (eq t (plist-get result :treesit-remap-unchanged)))
+    (should (eq t (plist-get result :md-mode-defined)))
+    (should (eq t (plist-get result :md-mode-maybe-defined)))))
+
+(ert-deftest md-ts-test-generated-autoloads-leave-global-markdown-settings-alone ()
+  "Loading generated autoloads must not mutate global Markdown mode selection."
+  (let* ((expression
+          (mapconcat
+           #'identity
+           `("(progn"
+             "  (require 'package)"
+             ,(format "  (let* ((repo-root %S)" md-ts-test--repo-root)
+             "         (tmpdir (make-temp-file \"md-ts-autoload-test-\" t))"
+             "         (src (expand-file-name \"md-ts-mode.el\" repo-root))"
+             "         (dst (expand-file-name \"md-ts-mode.el\" tmpdir)))"
+             "    (unwind-protect"
+             "        (progn"
+             "          (copy-file src dst t)"
+             "          (package-generate-autoloads \"md-ts-mode\" tmpdir)"
+             "          (defvar major-mode-remap-alist nil)"
+             "          (defvar treesit-major-mode-remap-alist nil)"
+             "          (let ((before-auto (copy-tree auto-mode-alist))"
+             "                (before-major-remap (copy-tree major-mode-remap-alist))"
+             "                (before-treesit-remap (copy-tree treesit-major-mode-remap-alist)))"
+             "            (load (expand-file-name \"md-ts-mode-autoloads.el\" tmpdir) nil t)"
+             ,(md-ts-test--batch-result-princ-form)
+             "            (prin1 (list"
+             "                    :auto-unchanged (equal before-auto auto-mode-alist)"
+             "                    :major-remap-unchanged (equal before-major-remap major-mode-remap-alist)"
+             "                    :treesit-remap-unchanged (equal before-treesit-remap treesit-major-mode-remap-alist)"
+             "                    :md-mode-autoload (autoloadp (symbol-function 'md-ts-mode))"
+             "                    :md-mode-maybe-autoload (autoloadp (symbol-function 'md-ts-mode-maybe))"
+             "                    :enable-global-autoload (autoloadp (symbol-function 'md-ts-mode-enable-global))))))"
+             "      (delete-directory tmpdir t))))")
+           " "))
+         (result (md-ts-test--read-batch-emacs-result expression)))
+    (should (eq t (plist-get result :auto-unchanged)))
+    (should (eq t (plist-get result :major-remap-unchanged)))
+    (should (eq t (plist-get result :treesit-remap-unchanged)))
+    (should (plist-get result :md-mode-autoload))
+    (should (plist-get result :md-mode-maybe-autoload))
+    (should (plist-get result :enable-global-autoload))))
+
+(ert-deftest md-ts-test-enable-global-is-explicit-and-idempotent ()
+  "Calling the helper should opt into global Markdown handling explicitly."
+  (let* ((expression
+          (prin1-to-string
+           `(progn
+              (require 'md-ts-mode)
+              (defvar major-mode-remap-alist nil)
+              (defvar treesit-major-mode-remap-alist nil)
+              (let ((before-auto (copy-tree auto-mode-alist))
+                    (before-major-remap (copy-tree major-mode-remap-alist))
+                    (before-treesit-remap
+                     (copy-tree treesit-major-mode-remap-alist)))
+                (md-ts-mode-enable-global)
+                (let ((after-first-auto (copy-tree auto-mode-alist))
+                      (after-first-major-remap
+                       (copy-tree major-mode-remap-alist))
+                      (after-first-treesit-remap
+                       (copy-tree treesit-major-mode-remap-alist)))
+                  (md-ts-mode-enable-global)
+                  (princ ,(format "\n%s\n" md-ts-test--result-marker))
+                  (prin1
+                   (list :helper-defined (fboundp 'md-ts-mode-enable-global)
+                         :auto-changed
+                         (not (equal before-auto after-first-auto))
+                         :major-remap-changed
+                         (not (equal before-major-remap
+                                     after-first-major-remap))
+                         :treesit-remap-unchanged
+                         (equal before-treesit-remap
+                                after-first-treesit-remap)
+                         :auto-idempotent
+                         (equal after-first-auto auto-mode-alist)
+                         :major-remap-idempotent
+                         (equal after-first-major-remap
+                                major-mode-remap-alist)
+                         :treesit-remap-idempotent
+                         (equal after-first-treesit-remap
+                                treesit-major-mode-remap-alist)
+                         :md-entry (car auto-mode-alist)
+                         :markdown-remap
+                         (assq 'markdown-mode major-mode-remap-alist))))))))
+         (result (md-ts-test--read-batch-emacs-result expression)))
+    (should (eq t (plist-get result :helper-defined)))
+    (should (eq t (plist-get result :auto-changed)))
+    (should (eq t (plist-get result :major-remap-changed)))
+    (should (eq t (plist-get result :treesit-remap-unchanged)))
+    (should (eq t (plist-get result :auto-idempotent)))
+    (should (eq t (plist-get result :major-remap-idempotent)))
+    (should (eq t (plist-get result :treesit-remap-idempotent)))
+    (should (equal '("\\.md\\'" . md-ts-mode-maybe)
+                   (plist-get result :md-entry)))
+    (should (equal '(markdown-mode . md-ts-mode)
+                   (plist-get result :markdown-remap)))))
+
+(ert-deftest md-ts-test-enable-global-prefers-md-ts-mode-over-markdown-ts-mode ()
+  "The helper should prefer `md-ts-mode' over built-in `markdown-ts-mode'."
+  (skip-unless (locate-library "markdown-ts-mode"))
+  (let* ((expression
+          (prin1-to-string
+           `(progn
+              (require 'md-ts-mode)
+              (require 'markdown-ts-mode)
+              (defvar major-mode-remap-alist nil)
+              (fset 'md-ts-mode
+                    (lambda ()
+                      (interactive)
+                      (setq major-mode 'md-ts-mode)))
+              (fset 'md-ts-mode-maybe
+                    (lambda ()
+                      (interactive)
+                      (md-ts-mode)))
+              (fset 'markdown-ts-mode
+                    (lambda ()
+                      (interactive)
+                      (setq major-mode 'markdown-ts-mode)))
+              (fset 'markdown-ts-mode-maybe
+                    (lambda ()
+                      (interactive)
+                      (markdown-ts-mode)))
+              (md-ts-mode-enable-global)
+              (princ ,(format "\n%s\n" md-ts-test--result-marker))
+              (prin1
+               (list :markdown-ts-remap (major-mode-remap 'markdown-ts-mode)
+                     :opened-mode (with-temp-buffer
+                                    (setq buffer-file-name
+                                          "/tmp/md-ts-prefer.md")
+                                    (set-auto-mode)
+                                    major-mode))))))
+         (result (md-ts-test--read-batch-emacs-result expression)))
+    (should (eq 'md-ts-mode (plist-get result :markdown-ts-remap)))
+    (should (eq 'md-ts-mode (plist-get result :opened-mode)))))
 
 (ert-deftest md-ts-test-heading ()
   "ATX heading should get md-ts-heading-* face."

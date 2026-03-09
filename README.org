@@ -56,9 +56,22 @@ Or clone the repository and add it to ~load-path~:
   (require 'md-ts-mode)
 #+end_src
 
-The package registers itself in ~auto-mode-alist~ for =.md= files
-and in ~treesit-major-mode-remap-alist~ as a replacement for
-~markdown-mode~.  No further configuration is needed.
+Loading the package defines ~md-ts-mode~ and registers its grammar
+recipes, but it does not change how Markdown files are chosen globally.
+
+If you want ~md-ts-mode~ to handle Markdown explicitly, add one line to
+your init file:
+
+#+begin_src elisp
+  (md-ts-mode-enable-global)
+#+end_src
+
+With a package install the helper is autoloaded; for the manual
+~load-path~ setup above, keep the ~require~ line.
+
+The helper is idempotent.  It adds a =.md= association, remaps
+~markdown-mode~, and on Emacs 31 also prefers ~md-ts-mode~ over the
+built-in ~markdown-ts-mode~.
 
 *** Install tree-sitter grammars
 
