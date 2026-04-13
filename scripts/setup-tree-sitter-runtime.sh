@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION=${1:-0.26.0}
+VERSION=${1:-0.25.10}
 EMACS_BIN=${2:-$(command -v emacs)}
 ROOT=${3:-$PWD/.cache/tree-sitter-runtime/$VERSION}
 
@@ -46,8 +46,9 @@ if [ ! -f "$lib_dir/$compat_name" ]; then
 
 /*
  * Tree-sitter 0.26 removed a handful of symbols that Emacs 29/30/31 binaries
- * linked against tree-sitter 0.25 still import at load time.  Provide the
- * narrowest compatibility bridge needed for CI runtime override lanes.
+ * linked against tree-sitter 0.25 still import at load time.  Keep this
+ * compatibility bridge generic so CI can probe alternate tree-sitter runtimes
+ * through the same helper.
  */
 uint32_t ts_language_version(const TSLanguage *self) {
   return ts_language_abi_version(self);

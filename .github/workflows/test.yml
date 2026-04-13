@@ -4,12 +4,14 @@ jobs:
   test:
     name: Emacs ${{ matrix.emacs }} / tree-sitter ${{ matrix.tree-sitter-runtime }}
     runs-on: ubuntu-latest
-    continue-on-error: ${{ matrix.tree-sitter-runtime == '0.26' }}
     strategy:
       fail-fast: false
       matrix:
         emacs: ['29.4', '30.2', 'snapshot']
-        tree-sitter-runtime: ['default', '0.26']
+        tree-sitter-runtime: ['default', '0.25']
+        include:
+          - emacs: 'snapshot'
+            tree-sitter-runtime: '0.26'
     steps:
       - uses: actions/checkout@v4
       - uses: purcell/setup-emacs@master
@@ -20,10 +22,18 @@ jobs:
           emacs --version | head -1
           readelf -d "$(command -v emacs)" | grep tree-sitter || true
           ldd "$(command -v emacs)" | grep tree-sitter || true
-      - name: Override tree-sitter runtime to 0.26
-        if: matrix.tree-sitter-runtime == '0.26'
+      - name: Override tree-sitter runtime
+        if: matrix.tree-sitter-runtime != 'default'
         run: |
-          lib_dir=$(./scripts/setup-tree-sitter-runtime.sh 0.26.0)
+          case "${{ matrix.tree-sitter-runtime }}" in
+            0.25) version=0.25.10 ;;
+            0.26) version=0.26.0 ;;
+            *)
+              echo "Unsupported tree-sitter runtime: ${{ matrix.tree-sitter-runtime }}" >&2
+              exit 1
+              ;;
+          esac
+          lib_dir=$(./scripts/setup-tree-sitter-runtime.sh "$version")
           echo "LD_LIBRARY_PATH=$lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
       - name: Show effective tree-sitter runtime
         run: |

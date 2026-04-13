@@ -120,7 +120,12 @@ signatures changed in Emacs 30 (~treesit-parser-create~,
 
 On Emacs 31 all guards are false and no shims are defined.
 
-Tested on Emacs 29.4, 30.1, and development snapshot (31).
+Tested on Emacs 29.4, 30.2, and development snapshot (31).
+CI probes libtree-sitter 0.25.10 on those Emacs versions, and also
+probes libtree-sitter 0.26 on snapshot.
+Emacs 29/30 with libtree-sitter 0.26+ is not currently a supported
+combination for ~md-ts-mode~, because upstream Emacs only gained that
+runtime compatibility later.
 
 
 ** Acknowledgments
