@@ -110,6 +110,18 @@ NTH selects occurrence (default 1)."
             (read (current-buffer))))
       (kill-buffer output-buffer))))
 
+(defun md-ts-test--range-rules-supports-range-fn-p ()
+  "Return non-nil when current `treesit-range-rules' stores `:range-fn'.
+This is true for our Emacs 29/30 shim and for newer native Emacs builds
+where the upstream shadowing bug is fixed."
+  (let ((settings (treesit-range-rules
+                   :embed 'markdown-inline
+                   :host 'markdown
+                   :range-fn #'treesit-range-fn-exclude-children
+                   '((inline) @cap))))
+    (and (= 1 (length settings))
+         (eq (nth 4 (car settings)) #'treesit-range-fn-exclude-children))))
+
 ;;; Font-lock correctness tests
 
 (ert-deftest md-ts-test-require-leaves-global-markdown-settings-alone ()
@@ -1012,10 +1024,11 @@ ranges differs from 1 (which is what you'd get without RANGE-FN)."
       (kill-buffer buf))))
 
 (ert-deftest md-ts-test-range-rules-range-fn ()
-  "Shimmed treesit-range-rules accepts :range-fn and produces 5-element tuple.
-On Emacs 31, the native treesit-range-rules has a variable
-shadowing bug that makes :range-fn dead code (nth 4 is always nil)."
-  :expected-result (if md-ts--range-shims-installed
+  "treesit-range-rules accepts :range-fn and produces a 5-element tuple.
+This should pass for our Emacs 29/30 shim and for native Emacs builds
+where the upstream shadowing bug is fixed.  On affected Emacs 31 builds,
+we still expect the historical failure until upstream is corrected."
+  :expected-result (if (md-ts-test--range-rules-supports-range-fn-p)
                        :passed :failed)
   (let ((settings (treesit-range-rules
                    :embed 'markdown-inline
