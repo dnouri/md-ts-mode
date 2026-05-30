@@ -151,6 +151,32 @@ where the upstream shadowing bug is fixed."
     (should (eq t (plist-get result :md-mode-defined)))
     (should (eq t (plist-get result :md-mode-maybe-defined)))))
 
+(ert-deftest md-ts-test-mode-keeps-managed-invisible-buffer-local ()
+  "Activating `md-ts-mode' must not globally manage `invisible'."
+  (let* ((expression
+          (prin1-to-string
+           `(progn
+              (require 'md-ts-mode)
+              (let ((before (copy-tree
+                             (default-value
+                              'font-lock-extra-managed-props))))
+                (with-temp-buffer
+                  (md-ts-mode)
+                  (princ ,(format "\n%s\n" md-ts-test--result-marker))
+                  (prin1
+                   (list :global-unchanged
+                         (equal before
+                                (default-value
+                                 'font-lock-extra-managed-props))
+                         :buffer-local
+                         (local-variable-p 'font-lock-extra-managed-props)
+                         :local-managed
+                         (memq 'invisible font-lock-extra-managed-props))))))))
+         (result (md-ts-test--read-batch-emacs-result expression)))
+    (should (eq t (plist-get result :global-unchanged)))
+    (should (eq t (plist-get result :buffer-local)))
+    (should (plist-get result :local-managed))))
+
 (ert-deftest md-ts-test-generated-autoloads-leave-global-markdown-settings-alone ()
   "Loading generated autoloads must not mutate global Markdown mode selection."
   (let* ((expression

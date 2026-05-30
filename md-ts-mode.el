@@ -1127,7 +1127,10 @@ VALUE non-nil hides markup, nil shows it."
   (make-local-variable 'md-ts-hide-markup)
   (setq-local treesit-font-lock-settings md-ts--treesit-settings)
   (setq-local treesit-range-settings (md-ts--range-settings))
-  (add-to-list 'font-lock-extra-managed-props 'invisible)
+  (setq-local font-lock-extra-managed-props
+              (if (memq 'invisible font-lock-extra-managed-props)
+                  font-lock-extra-managed-props
+                (cons 'invisible font-lock-extra-managed-props)))
 
   (when (treesit-ready-p 'html t)
     (treesit-parser-create 'html)
