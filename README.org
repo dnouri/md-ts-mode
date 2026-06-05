@@ -26,6 +26,9 @@ Emacs 29, 30, and 31.
   available.
 - Hide-markup mode: ~md-ts-toggle-hide-markup~ hides delimiters
   (=#=, =*=, =~=, brackets, URLs) so only content is visible.
+- Follow links: ~md-ts-browse-url-at-point~ (bound to ~C-c C-o~) opens
+  the link URL at point, resolving it from the parse tree so it works
+  even when hide-markup has hidden the URL.
 - Imenu and ~outline-minor-mode~ integration via headings.
 - Custom faces: ~md-ts-heading-1~ through ~md-ts-heading-6~,
   ~md-ts-setext-heading~, ~md-ts-delimiter~, ~md-ts-list-marker~,

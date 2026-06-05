@@ -1120,6 +1120,35 @@ VALUE non-nil hides markup, nil shows it."
   (setq md-ts-hide-markup (not md-ts-hide-markup))
   (md-ts--set-hide-markup md-ts-hide-markup))
 
+;;; Links
+
+(defun md-ts--link-destination-at-point ()
+  "Return the URL of the Markdown link at or around point, or nil.
+Walks up from the inline node at point to the enclosing link or
+image node and returns the text of its `link_destination' child.
+When `md-ts-hide-markup' is non-nil the URL is hidden via an
+invisible text property, so this reads the raw node text directly
+from the tree-sitter parse rather than relying on visible text."
+  (when-let* ((node (treesit-node-at (point) 'markdown-inline))
+              (link (treesit-parent-until
+                     node
+                     (lambda (n)
+                       (member (treesit-node-type n)
+                               '("inline_link" "image")))
+                     t)))
+    (when-let* ((dest (treesit-search-subtree link "link_destination")))
+      (treesit-node-text dest t))))
+
+(defun md-ts-browse-url-at-point ()
+  "Browse the Markdown link URL at or around point.
+Resolves the URL from the tree-sitter parse, which works even when
+`md-ts-hide-markup' has hidden the `(URL)' tail via invisible text."
+  (interactive)
+  (let ((url (md-ts--link-destination-at-point)))
+    (if url
+        (browse-url url)
+      (user-error "No Markdown link at point"))))
+
 ;;; Major mode
 
 (defun md-ts-setup ()
@@ -1213,9 +1242,14 @@ VALUE non-nil hides markup, nil shows it."
                          (indented_code_block) @md-ts-code))))
   (treesit-font-lock-recompute-features '(code)))
 
+(defvar-keymap md-ts-mode-map
+  :doc "Keymap for `md-ts-mode'."
+  "C-c C-o" #'md-ts-browse-url-at-point)
+
 ;;;###autoload
 (define-derived-mode md-ts-mode text-mode "Markdown"
   "Major mode for editing Markdown using tree-sitter grammar."
+  :keymap md-ts-mode-map
 
   (setq-local comment-start "<!-- ")
   (setq-local comment-end " -->")
