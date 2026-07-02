@@ -40,6 +40,10 @@
 ;;; Code:
 
 (require 'treesit)
+(require 'button)
+(require 'browse-url)
+(require 'url-mailto)
+(require 'url-parse)
 (require 'seq)
 (require 'subr-x)
 (require 'outline)
@@ -856,6 +860,101 @@ Replaces `[ ]' with ☐ and `[x]' with ☑ via `display' property."
                                    override start end)
     (put-text-property beg node-end 'display glyph)))
 
+(defun md-ts--child-by-type (node type)
+  "Return the first named child of NODE whose type is TYPE."
+  (seq-find (lambda (child)
+              (string= (treesit-node-type child) type))
+            (treesit-node-children node t)))
+
+(defun md-ts--node-text (node)
+  "Return NODE text without text properties."
+  (buffer-substring-no-properties (treesit-node-start node)
+                                  (treesit-node-end node)))
+
+(defconst md-ts--uri-scheme-regexp "\\`[[:alpha:]][[:alnum:]+.-]*:"
+  "Regexp matching a URI scheme at the start of a string.")
+
+(defconst md-ts--windows-drive-path-regexp "\\`[[:alpha:]]:[/\\\\]"
+  "Regexp matching an absolute Windows drive path.")
+
+(defun md-ts--windows-drive-path-p (destination)
+  "Return non-nil if DESTINATION has Windows drive-path syntax."
+  (string-match-p md-ts--windows-drive-path-regexp destination))
+
+(defun md-ts--uri-scheme-p (destination)
+  "Return non-nil when DESTINATION should be opened as a URI."
+  (and (string-match-p md-ts--uri-scheme-regexp destination)
+       (not (md-ts--windows-drive-path-p destination))))
+
+(defun md-ts--local-link-file (destination)
+  "Return the file part of local link DESTINATION.
+For local paths with a trailing #fragment, remove the fragment.
+Heading navigation for the fragment is intentionally deferred."
+  (if-let* ((fragment-start (string-match-p "#" destination)))
+      (substring destination 0 fragment-start)
+    destination))
+
+(defun md-ts--markdown-unescape (text)
+  "Return TEXT with basic Markdown backslash escapes decoded."
+  (replace-regexp-in-string "\\\\\\([[:punct:]]\\)" "\\1" text t))
+
+(defun md-ts--link-destination-url (destination)
+  "Return the URL represented by raw link DESTINATION text.
+Unwrap angle-bracket destinations and decode basic Markdown
+backslash escapes."
+  (let ((url (if (and (> (length destination) 1)
+                      (string-prefix-p "<" destination)
+                      (string-suffix-p ">" destination))
+                 (substring destination 1 -1)
+               destination)))
+    (md-ts--markdown-unescape url)))
+
+(defun md-ts--open-link-destination (url)
+  "Open inline Markdown link destination URL.
+Use `url-mailto' for `mailto:' URIs, `browse-url' for other URI
+schemes, and `find-file' for local or relative paths.  For local
+paths with a #fragment, open only the file part; fragment
+navigation is deferred.  Fragment-only and empty destinations are
+not supported yet."
+  (let ((case-fold-search t))
+    (cond
+     ((string-empty-p url)
+      (user-error "Empty link destinations are not supported"))
+     ((string-prefix-p "#" url)
+      (user-error "Same-buffer fragment links are not supported yet"))
+     ((string-match-p "\\`mailto:" url)
+      (url-mailto (url-generic-parse-url url)))
+     ((md-ts--windows-drive-path-p url)
+      (find-file (md-ts--local-link-file url)))
+     ((md-ts--uri-scheme-p url)
+      (browse-url url))
+     (t
+      (find-file (md-ts--local-link-file url))))))
+
+(defun md-ts--make-link-button (beg end url)
+  "Make the text from BEG to END open URL as a standard button."
+  (when (and (< beg end) (not (string-empty-p url)))
+    (make-text-button beg end
+                      'action (lambda (_button)
+                                (md-ts--open-link-destination url))
+                      'help-echo url)))
+
+(defun md-ts--fontify-inline-link-text (node override start end &rest _)
+  "Fontify inline link text NODE and make it a clickable button.
+OVERRIDE, START, and END are passed to `treesit-fontify-with-override'."
+  (treesit-fontify-with-override
+   (treesit-node-start node) (treesit-node-end node)
+   'link override start end)
+  (let ((parent (treesit-node-parent node)))
+    (when (and parent (string= (treesit-node-type parent) "inline_link"))
+      (when-let* ((destination-node (md-ts--child-by-type parent
+                                                          "link_destination")))
+        (md-ts--make-link-button
+         (treesit-node-start node)
+         (treesit-node-end node)
+         (md-ts--link-destination-url
+          (md-ts--node-text destination-node)))))))
+
 (defun md-ts--fontify-link-node (node override start end &rest _)
   "Fontify inline link or image NODE, optionally hiding URL.
 Applies `shadow' to bracket/paren delimiters.  When
@@ -976,7 +1075,7 @@ font-lock rule to avoid interfering with embedded language faces."
      ((emphasis) @italic)
      ((strong_emphasis) @bold)
      ((strikethrough) @md-ts-strikethrough)
-     (inline_link (link_text) @link)
+     (inline_link (link_text) @md-ts--fontify-inline-link-text)
      (inline_link (link_destination) @font-lock-string-face)
      (shortcut_link (link_text) @link)
      (full_reference_link (link_text) @link)
@@ -1128,9 +1227,8 @@ VALUE non-nil hides markup, nil shows it."
   (setq-local treesit-font-lock-settings md-ts--treesit-settings)
   (setq-local treesit-range-settings (md-ts--range-settings))
   (setq-local font-lock-extra-managed-props
-              (if (memq 'invisible font-lock-extra-managed-props)
-                  font-lock-extra-managed-props
-                (cons 'invisible font-lock-extra-managed-props)))
+              (seq-uniq (append '(invisible button category action help-echo)
+                                font-lock-extra-managed-props)))
 
   (when (treesit-ready-p 'html t)
     (treesit-parser-create 'html)

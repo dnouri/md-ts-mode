@@ -21,7 +21,9 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'ert)
+(require 'button)
 (require 'md-ts-mode)
 
 ;;; Test helpers
@@ -71,6 +73,56 @@ NTH selects occurrence (default 1)."
             (search-forward search))
           (get-text-property (match-beginning 0) 'invisible))
       (kill-buffer buf))))
+
+(defun md-ts-test--props-at (text search props &optional nth)
+  "In markdown TEXT, return PROPS at SEARCH as an alist.
+NTH selects occurrence (default 1)."
+  (let ((buf (md-ts-test--fontify text))
+        (n (or nth 1)))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (dotimes (_ n)
+            (search-forward search))
+          (let ((pos (match-beginning 0)))
+            (mapcar (lambda (prop)
+                      (cons prop (get-text-property pos prop)))
+                    props)))
+      (kill-buffer buf))))
+
+(defun md-ts-test--button-at-search (text search &optional nth)
+  "Non-nil if SEARCH in markdown TEXT is a text button.
+NTH selects occurrence (default 1)."
+  (let ((buf (md-ts-test--fontify text))
+        (n (or nth 1)))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (dotimes (_ n)
+            (search-forward search))
+          (and (button-at (match-beginning 0)) t))
+      (kill-buffer buf))))
+
+(defun md-ts-test--push-button-at-search (text search &optional nth)
+  "Activate the text button at SEARCH in markdown TEXT.
+NTH selects occurrence (default 1)."
+  (let ((buf (md-ts-test--fontify text))
+        (n (or nth 1)))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (dotimes (_ n)
+            (search-forward search))
+          (let ((pos (match-beginning 0)))
+            (should (button-at pos))
+            (push-button pos)))
+      (kill-buffer buf))))
+
+(defun md-ts-test--help-echo-at-search (text search &optional nth)
+  "Return the `help-echo' property at SEARCH in markdown TEXT.
+NTH selects occurrence (default 1)."
+  (alist-get 'help-echo
+             (md-ts-test--props-at text search '(help-echo) nth)))
 
 (defconst md-ts-test--repo-root
   (file-name-directory
@@ -605,6 +657,215 @@ inline parser ranges cause the first range's faces to be dropped."
            "Visit [here](http://example.com) now.\n"
            "http://example.com" 'font-lock-string-face)))
 
+(ert-deftest md-ts-test-link-destination-url-normalizes-markdown-syntax ()
+  "Raw link destinations should become opener-ready URLs."
+  (should (equal (md-ts--link-destination-url
+                  "<https://example.com/a b>")
+                 "https://example.com/a b"))
+  (should (equal (md-ts--link-destination-url
+                  "https://example.com/a\\)b")
+                 "https://example.com/a)b"))
+  (should (equal (md-ts--link-destination-url
+                  "<https://example.com/a\\*b>")
+                 "https://example.com/a*b"))
+  (should (equal (md-ts--link-destination-url "C:\\path")
+                 "C:\\path")))
+
+(ert-deftest md-ts-test-link-inline-button ()
+  "Inline link text should activate the exact destination."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--push-button-at-search
+       "Visit [here](http://example.com) now.\n"
+       "here"))
+    (should (equal opened "http://example.com"))))
+
+(ert-deftest md-ts-test-link-inline-help-echo ()
+  "Inline link text should expose the destination as help echo."
+  (should (equal (md-ts-test--help-echo-at-search
+                  "Visit [here](http://example.com) now.\n"
+                  "here")
+                 "http://example.com")))
+
+(ert-deftest md-ts-test-link-inline-angle-destination ()
+  "Angle-bracket inline destinations should open without brackets."
+  (let ((text "Visit [here](<https://example.com/a b>) now.\n")
+        (url "https://example.com/a b")
+        opened)
+    (should (equal (md-ts-test--help-echo-at-search text "here") url))
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (dest &rest _args)
+                 (setq opened dest))))
+      (md-ts-test--push-button-at-search text "here"))
+    (should (equal opened url))))
+
+(ert-deftest md-ts-test-link-inline-escaped-destination ()
+  "Markdown backslash escapes in destinations should be decoded."
+  (let ((text "Visit [here](https://example.com/a\\)b) now.\n")
+        (url "https://example.com/a)b")
+        opened)
+    (should (equal (md-ts-test--help-echo-at-search text "here") url))
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (dest &rest _args)
+                 (setq opened dest))))
+      (md-ts-test--push-button-at-search text "here"))
+    (should (equal opened url))))
+
+(ert-deftest md-ts-test-link-inline-relative-path-uses-find-file ()
+  "Relative inline destinations should use `find-file' semantics."
+  (let ((text "Open [notes](docs/notes.md) please.\n")
+        (dir (file-name-as-directory
+              (make-temp-file "md-ts-link-default-directory-" t)))
+        opened)
+    (unwind-protect
+        (cl-letf (((symbol-function 'find-file)
+                   (lambda (file &rest _args)
+                     (setq opened (list file default-directory))))
+                  ((symbol-function 'browse-url)
+                   (lambda (&rest _args)
+                     (ert-fail "browse-url called for relative path"))))
+          (let ((buf (md-ts-test--fontify text)))
+            (unwind-protect
+                (with-current-buffer buf
+                  (setq default-directory dir)
+                  (goto-char (point-min))
+                  (search-forward "notes")
+                  (push-button (match-beginning 0)))
+              (kill-buffer buf))))
+      (delete-directory dir t))
+    (should (equal opened (list "docs/notes.md" dir)))))
+
+(ert-deftest md-ts-test-link-inline-mailto-uses-url-mailto ()
+  "Mailto inline destinations should use Emacs's URL mailto handler."
+  (let (mailed)
+    (cl-letf (((symbol-function 'url-mailto)
+               (lambda (parsed-url)
+                 (setq mailed (list (url-type parsed-url)
+                                    (url-filename parsed-url)))))
+              ((symbol-function 'browse-url)
+               (lambda (&rest _args)
+                 (ert-fail "browse-url called for mailto link")))
+              ((symbol-function 'find-file)
+               (lambda (&rest _args)
+                 (ert-fail "find-file called for mailto link"))))
+      (md-ts-test--push-button-at-search
+       "Email [me](mailto:me@example.com?subject=Hi).\n"
+       "me"))
+    (should (equal mailed '("mailto" "me@example.com?subject=Hi")))))
+
+(ert-deftest md-ts-test-link-inline-uri-scheme-uses-browse-url ()
+  "Non-mail URI schemes should still use `browse-url'."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url)))
+              ((symbol-function 'find-file)
+               (lambda (&rest _args)
+                 (ert-fail "find-file called for URI link"))))
+      (md-ts-test--push-button-at-search
+       "Read [capsule](gemini://example.com).\n"
+       "capsule"))
+    (should (equal opened "gemini://example.com"))))
+
+(ert-deftest md-ts-test-link-inline-fragment-is-deferred ()
+  "Same-buffer fragment-only destinations are explicitly deferred."
+  (cl-letf (((symbol-function 'browse-url)
+             (lambda (&rest _args)
+               (ert-fail "browse-url called for fragment link")))
+            ((symbol-function 'find-file)
+             (lambda (&rest _args)
+               (ert-fail "find-file called for fragment link"))))
+    (should-error (md-ts--open-link-destination "#intro")
+                  :type 'user-error)))
+
+(ert-deftest md-ts-test-link-inline-local-path-fragment-opens-file-only ()
+  "Local path fragments open the file; heading navigation is deferred."
+  (let ((text "Open [notes](docs/file.md#intro) please.\n")
+        opened)
+    (should (equal (md-ts-test--help-echo-at-search text "notes")
+                   "docs/file.md#intro"))
+    (cl-letf (((symbol-function 'find-file)
+               (lambda (file &rest _args)
+                 (setq opened file)))
+              ((symbol-function 'browse-url)
+               (lambda (&rest _args)
+                 (ert-fail "browse-url called for local path fragment"))))
+      (md-ts-test--push-button-at-search text "notes"))
+    (should (equal opened "docs/file.md"))))
+
+(ert-deftest md-ts-test-link-inline-windows-drive-paths-use-find-file ()
+  "Windows drive paths should be opened as files, not URI schemes."
+  (let (opened)
+    (cl-letf (((symbol-function 'find-file)
+               (lambda (file &rest _args)
+                 (push file opened)))
+              ((symbol-function 'browse-url)
+               (lambda (&rest _args)
+                 (ert-fail "browse-url called for Windows drive path"))))
+      (md-ts--open-link-destination "C:/foo")
+      (md-ts--open-link-destination "C:\\foo"))
+    (should (equal (nreverse opened) '("C:/foo" "C:\\foo")))))
+
+(ert-deftest md-ts-test-link-inline-empty-destination-is-not-buttonized ()
+  "Empty inline destinations should not create unusable buttons."
+  (let ((text "Empty [x](<>) link.\n"))
+    (should-not (md-ts-test--button-at-search text "x"))
+    (should-not (md-ts-test--help-echo-at-search text "x")))
+  (cl-letf (((symbol-function 'find-file)
+             (lambda (&rest _args)
+               (ert-fail "find-file called for empty destination")))
+            ((symbol-function 'browse-url)
+             (lambda (&rest _args)
+               (ert-fail "browse-url called for empty destination"))))
+    (should-error (md-ts--open-link-destination "")
+                  :type 'user-error)))
+
+(ert-deftest md-ts-test-link-inline-button-spans-visible-label-only ()
+  "Inline link buttons should cover the label, not markup or URL."
+  (let ((buf (md-ts-test--fontify
+              "Visit [here](http://example.com) now.\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "here")
+          (let* ((label-start (match-beginning 0))
+                 (label-end (match-end 0))
+                 (button (button-at label-start)))
+            (should button)
+            (should (equal (cons (button-start button)
+                                 (button-end button))
+                           (cons label-start label-end)))
+            (should-not (button-at (1- label-start)))
+            (should-not (button-at label-end))
+            (search-forward "http://example.com")
+            (should-not (button-at (match-beginning 0)))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-inline-button-properties-clean-after-edit ()
+  "Editing an inline link into plain text should remove button props."
+  (let ((buf (md-ts-test--fontify
+              "Visit [here](http://example.com) now.\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "here")
+          (should (button-at (match-beginning 0)))
+          (goto-char (point-min))
+          (search-forward "[here](http://example.com)")
+          (replace-match "here" t t)
+          (font-lock-flush)
+          (font-lock-ensure)
+          (goto-char (point-min))
+          (search-forward "here")
+          (let ((pos (match-beginning 0)))
+            (should-not (button-at pos))
+            (dolist (prop '(button category action help-echo keymap
+                                   mouse-face follow-link))
+              (should-not (get-text-property pos prop)))))
+      (kill-buffer buf))))
+
 (ert-deftest md-ts-test-full-reference-link ()
   "Full reference link [text][ref] should get `link' face on text."
   (should (md-ts-test--has-face
@@ -648,6 +909,24 @@ inline parser ranges cause the first range's faces to be dropped."
     (should-not (md-ts-test--invisible-at
                  "Visit [here](http://example.com) now.\n"
                  "here"))))
+
+(ert-deftest md-ts-test-hide-markup-link-inline-button ()
+  "With hide-markup, visible inline link text should stay activatable."
+  (let ((md-ts-hide-markup t))
+    (should (eq (md-ts-test--invisible-at
+                 "Visit [here](http://example.com) now.\n"
+                 "[")
+                'md-ts--markup))
+    (should (eq (md-ts-test--invisible-at
+                 "Visit [here](http://example.com) now.\n"
+                 "(http")
+                'md-ts--markup))
+    (should-not (md-ts-test--invisible-at
+                 "Visit [here](http://example.com) now.\n"
+                 "here"))
+    (should (md-ts-test--button-at-search
+             "Visit [here](http://example.com) now.\n"
+             "here"))))
 
 (ert-deftest md-ts-test-hide-markup-image ()
   "With hide-markup, image URL and delimiters should be invisible."
