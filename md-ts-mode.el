@@ -909,6 +909,90 @@ backslash escapes."
                destination)))
     (md-ts--markdown-unescape url)))
 
+(defvar-local md-ts--link-reference-definitions-cache nil
+  "Cached alist of Markdown link reference definitions.
+Each entry has the form (LABEL . URL), where LABEL is normalized
+with `md-ts--reference-label-key'.")
+
+(defvar-local md-ts--link-reference-definitions-cache-tick nil
+  "Buffer modified tick represented by reference definitions cache.
+A nil value means no cache is available.")
+
+(defvar-local md-ts--link-reference-definition-change-p nil
+  "Non-nil when current change may affect reference definitions.")
+
+(defconst md-ts--markdown-fence-regexp
+  (concat "^[ \t]\\{0,3\\}"
+          "\\(?:>[ \t]?[ \t]\\{0,3\\}\\)*"
+          "\\(?:\\(?:[-+*]\\|[0-9]\\{1,9\\}[.)]\\)[ \t]+\\)?"
+          "\\(?:>[ \t]?[ \t]\\{0,3\\}\\)*"
+          "\\(?:`\\{3,\\}\\|~\\{3,\\}\\)")
+  "Regexp matching a Markdown fenced code block delimiter line.
+This includes delimiter lines after block quote or list container markers.")
+
+(defun md-ts--reference-label-key (label)
+  "Return the normalized reference key for Markdown LABEL.
+LABEL may include surrounding brackets.  The result strips those
+brackets, trims leading and trailing whitespace, collapses
+internal whitespace, and lowercases with `downcase'.  Backslash
+escapes are preserved literally, so escaped punctuation remains
+distinct from unescaped punctuation."
+  (let* ((trimmed (string-trim label))
+         (unbracketed (if (and (> (length trimmed) 1)
+                               (string-prefix-p "[" trimmed)
+                               (string-suffix-p "]" trimmed))
+                          (substring trimmed 1 -1)
+                        trimmed))
+         (collapsed (replace-regexp-in-string
+                     "[[:space:]]+" " " (string-trim unbracketed))))
+    (downcase collapsed)))
+
+(defun md-ts--link-reference-definitions ()
+  "Return cached Markdown link reference definitions.
+The result is an alist of (LABEL . URL).  LABEL is normalized with
+`md-ts--reference-label-key'.  URL is normalized with
+`md-ts--link-destination-url'.  When duplicate labels exist, the
+first definition in source order wins.  The cache ignores any
+active narrowing so references resolve against the whole buffer."
+  (save-restriction
+    (widen)
+    (let ((tick (buffer-chars-modified-tick)))
+      (unless (equal md-ts--link-reference-definitions-cache-tick tick)
+        (let (definitions)
+          (when-let* ((root (ignore-errors
+                              (treesit-buffer-root-node 'markdown))))
+            (dolist (capture (treesit-query-capture
+                              root
+                              '((link_reference_definition
+                                 (link_label) @label))))
+              (let* ((label-node (cdr capture))
+                     (parent (treesit-node-parent label-node))
+                     (destination-node
+                      (and parent
+                           (md-ts--child-by-type parent
+                                                 "link_destination")))
+                     (key (md-ts--reference-label-key
+                           (md-ts--node-text label-node))))
+                (when (and destination-node
+                           (not (string-empty-p key))
+                           (not (assoc key definitions)))
+                  (push (cons key
+                              (md-ts--link-destination-url
+                               (md-ts--node-text destination-node)))
+                        definitions)))))
+          (setq md-ts--link-reference-definitions-cache
+                (nreverse definitions)
+                md-ts--link-reference-definitions-cache-tick tick)))
+      md-ts--link-reference-definitions-cache)))
+
+(defun md-ts--resolve-link-reference (label)
+  "Resolve Markdown reference LABEL to its destination URL.
+Return nil when the current buffer has no matching link reference
+definition."
+  (alist-get (md-ts--reference-label-key label)
+             (md-ts--link-reference-definitions)
+             nil nil #'equal))
+
 (defun md-ts--open-link-destination (url)
   "Open inline Markdown link destination URL.
 Use `url-mailto' for `mailto:' URIs, `browse-url' for other URI
@@ -931,35 +1015,185 @@ not supported yet."
      (t
       (find-file (md-ts--local-link-file url))))))
 
-(defun md-ts--make-link-button (beg end url)
-  "Make the text from BEG to END open URL as a standard button."
+(defun md-ts--make-link-button (beg end url &optional dynamic)
+  "Make the text from BEG to END open URL as a standard button.
+When DYNAMIC is non-nil, resolve the parsed Markdown link target
+again at activation time.  This keeps reference-link buttons fresh
+when definitions elsewhere in the buffer change."
   (when (and (< beg end) (not (string-empty-p url)))
     (make-text-button beg end
-                      'action (lambda (_button)
-                                (md-ts--open-link-destination url))
+                      'action (if dynamic
+                                  #'md-ts--open-link-button
+                                (lambda (_button)
+                                  (md-ts--open-link-destination url)))
                       'help-echo url)))
 
-(defun md-ts--fontify-inline-link-text (node override start end &rest _)
-  "Fontify inline link text NODE and make it a clickable button.
+(defconst md-ts--link-node-types
+  '("inline_link" "image" "full_reference_link"
+    "collapsed_reference_link" "shortcut_link"
+    "uri_autolink" "email_autolink"
+    "link_reference_definition")
+  "Tree-sitter node types that represent parsed Markdown links.")
+
+(defconst md-ts--link-text-owner-node-types
+  '("inline_link" "full_reference_link"
+    "collapsed_reference_link" "shortcut_link")
+  "Tree-sitter node types that own visible `link_text' nodes.")
+
+(defun md-ts--link-text-owner-node (node)
+  "Return the parsed link node that owns link_text NODE, or nil."
+  (when (string= (treesit-node-type node) "link_text")
+    (let ((parent (treesit-node-parent node)))
+      (and parent
+           (member (treesit-node-type parent)
+                   md-ts--link-text-owner-node-types)
+           parent))))
+
+(defun md-ts--enclosing-link-text-owner (node)
+  "Return nearest parsed link with a `link_text' ancestor of NODE."
+  (let (owner)
+    (while (and node (not owner))
+      (setq owner (md-ts--link-text-owner-node node)
+            node (treesit-node-parent node)))
+    owner))
+
+(defun md-ts--image-node-for-description-descendant (node)
+  "Return nearest image node with an image-description ancestor of NODE."
+  (let (description image)
+    (while (and node (not description))
+      (when (string= (treesit-node-type node) "image_description")
+        (setq description node))
+      (setq node (treesit-node-parent node)))
+    (setq node (and description (treesit-node-parent description)))
+    (while (and node (not image))
+      (when (string= (treesit-node-type node) "image")
+        (setq image node))
+      (setq node (treesit-node-parent node)))
+    image))
+
+(defun md-ts--nearest-link-node (node)
+  "Return the nearest parsed Markdown link node containing NODE."
+  (while (and node
+              (not (member (treesit-node-type node)
+                           md-ts--link-node-types)))
+    (setq node (treesit-node-parent node)))
+  node)
+
+(defun md-ts--link-node-for-node (node)
+  "Return the parsed Markdown link node that owns NODE, or nil.
+Visible text inside an enclosing `link_text' belongs to that
+outer link.  Link-like syntax inside an image description belongs
+rather to the image target, unless the whole image is itself in an
+enclosing link label."
+  (if-let* ((image-node (md-ts--image-node-for-description-descendant node)))
+      (or (md-ts--enclosing-link-text-owner image-node)
+          image-node)
+    (or (md-ts--enclosing-link-text-owner node)
+        (md-ts--nearest-link-node node))))
+
+(defun md-ts--autolink-inner-text (node)
+  "Return the target text inside autolink NODE's angle brackets."
+  (buffer-substring-no-properties (1+ (treesit-node-start node))
+                                  (1- (treesit-node-end node))))
+
+(defun md-ts--link-target-for-node (node)
+  "Return the opener-ready target URL for parsed link NODE.
+NODE may be a link node itself or any descendant.  Return nil for
+missing reference definitions."
+  (when-let* ((link-node (md-ts--link-node-for-node node)))
+    (pcase (treesit-node-type link-node)
+      ("inline_link"
+       (when-let* ((destination-node
+                    (md-ts--child-by-type link-node "link_destination")))
+         (md-ts--link-destination-url
+          (md-ts--node-text destination-node))))
+      ("image"
+       (if-let* ((destination-node
+                  (md-ts--child-by-type link-node "link_destination")))
+           (md-ts--link-destination-url
+            (md-ts--node-text destination-node))
+         (if-let* ((label-node (md-ts--child-by-type link-node
+                                                       "link_label")))
+             (md-ts--resolve-link-reference
+              (md-ts--node-text label-node))
+           (when-let* ((description-node
+                        (md-ts--child-by-type link-node
+                                              "image_description")))
+             (md-ts--resolve-link-reference
+              (md-ts--node-text description-node))))))
+      ("link_reference_definition"
+       (when-let* ((destination-node
+                    (md-ts--child-by-type link-node "link_destination")))
+         (md-ts--link-destination-url
+          (md-ts--node-text destination-node))))
+      ("full_reference_link"
+       (when-let* ((label-node (md-ts--child-by-type link-node
+                                                     "link_label")))
+         (md-ts--resolve-link-reference
+          (md-ts--node-text label-node))))
+      ((or "collapsed_reference_link" "shortcut_link")
+       (when-let* ((text-node (md-ts--child-by-type link-node
+                                                   "link_text")))
+         (md-ts--resolve-link-reference
+          (md-ts--node-text text-node))))
+      ("uri_autolink"
+       (md-ts--autolink-inner-text link-node))
+      ("email_autolink"
+       (concat "mailto:" (md-ts--autolink-inner-text link-node))))))
+
+(defun md-ts--fontify-link-text (node override start end &rest _)
+  "Fontify visible Markdown link text NODE and make it clickable.
 OVERRIDE, START, and END are passed to `treesit-fontify-with-override'."
   (treesit-fontify-with-override
    (treesit-node-start node) (treesit-node-end node)
    'link override start end)
-  (let ((parent (treesit-node-parent node)))
-    (when (and parent (string= (treesit-node-type parent) "inline_link"))
-      (when-let* ((destination-node (md-ts--child-by-type parent
-                                                          "link_destination")))
+  (when-let* ((url (md-ts--link-target-for-node node)))
+    (md-ts--make-link-button
+     (treesit-node-start node) (treesit-node-end node) url t)))
+
+(defun md-ts--fontify-autolink (node override start end &rest _)
+  "Fontify autolink NODE and make its inner target clickable.
+For email autolinks, the button target is prefixed with
+\"mailto:\".  When `md-ts-hide-markup' is non-nil, hide only the
+angle brackets.  OVERRIDE, START, and END are passed to
+`treesit-fontify-with-override'."
+  (let ((node-start (treesit-node-start node))
+        (node-end (treesit-node-end node)))
+    (when (< (1+ node-start) (1- node-end))
+      (treesit-fontify-with-override
+       (1+ node-start) (1- node-end) 'link override start end)
+      (when-let* ((url (md-ts--link-target-for-node node)))
         (md-ts--make-link-button
-         (treesit-node-start node)
-         (treesit-node-end node)
-         (md-ts--link-destination-url
-          (md-ts--node-text destination-node)))))))
+         (1+ node-start) (1- node-end) url t)))
+    (treesit-fontify-with-override
+     node-start (1+ node-start) 'shadow override start end)
+    (treesit-fontify-with-override
+     (1- node-end) node-end 'shadow override start end)
+    (when md-ts-hide-markup
+      (put-text-property node-start (1+ node-start)
+                         'invisible 'md-ts--markup)
+      (put-text-property (1- node-end) node-end
+                         'invisible 'md-ts--markup))))
+
+(defun md-ts--fontify-link-reference-definition-label
+    (node override start end &rest _)
+  "Fontify link reference definition label NODE and buttonize it.
+Only the text inside the brackets becomes a link button.  The
+target is the definition's destination.  OVERRIDE, START, and END
+are passed to `treesit-fontify-with-override'."
+  (let ((inner-start (1+ (treesit-node-start node)))
+        (inner-end (1- (treesit-node-end node))))
+    (when (< inner-start inner-end)
+      (treesit-fontify-with-override
+       inner-start inner-end 'link override start end)
+      (when-let* ((url (md-ts--link-target-for-node node)))
+        (md-ts--make-link-button inner-start inner-end url t)))))
 
 (defun md-ts--fontify-link-node (node override start end &rest _)
-  "Fontify inline link or image NODE, optionally hiding URL.
+  "Fontify parsed link delimiters in NODE, optionally hiding markup.
 Applies `shadow' to bracket/paren delimiters.  When
-`md-ts-hide-markup' is non-nil, hides the `[', `]', and the
-entire `(URL)' tail so only the link text remains visible.
+`md-ts-hide-markup' is non-nil, hides the opening marker and
+trailing markup so only the link text remains visible.
 OVERRIDE, START, and END are passed to `treesit-fontify-with-override'."
   (dolist (child (treesit-node-children node))
     (let ((type (treesit-node-type child)))
@@ -1054,7 +1288,13 @@ font-lock rule to avoid interfering with embedded language faces."
      (list_item (task_list_marker_checked) @md-ts--fontify-task-marker)
      ((pipe_table_delimiter_row) @md-ts-delimiter)
      ((pipe_table_header) @bold)
-     ((html_block) @font-lock-doc-face))
+     ((html_block) @font-lock-doc-face)
+     (link_reference_definition
+      (link_label) @md-ts--fontify-link-reference-definition-label)
+     (link_reference_definition
+      (link_destination) @font-lock-string-face)
+     (link_reference_definition
+      (link_title) @font-lock-string-face))
 
    :language 'markdown
    :feature 'paragraph
@@ -1068,19 +1308,20 @@ font-lock rule to avoid interfering with embedded language faces."
    :language 'markdown-inline
    :override 'append
    :feature 'paragraph-inline
-   '(((image_description) @link)
-     ((link_destination) @font-lock-string-face)
+   '(((link_destination) @font-lock-string-face)
      ((code_span) @md-ts-code)
      ((code_span_delimiter) @md-ts--fontify-delimiter)
      ((emphasis) @italic)
      ((strong_emphasis) @bold)
      ((strikethrough) @md-ts-strikethrough)
-     (inline_link (link_text) @md-ts--fontify-inline-link-text)
-     (inline_link (link_destination) @font-lock-string-face)
-     (shortcut_link (link_text) @link)
-     (full_reference_link (link_text) @link)
+     (inline_link (link_text) @md-ts--fontify-link-text)
+     (image (image_description) @md-ts--fontify-link-text)
+     (shortcut_link (link_text) @md-ts--fontify-link-text)
+     (full_reference_link (link_text) @md-ts--fontify-link-text)
      (full_reference_link (link_label) @shadow)
-     (collapsed_reference_link (link_text) @link))
+     (collapsed_reference_link (link_text) @md-ts--fontify-link-text)
+     ((uri_autolink) @md-ts--fontify-autolink)
+     ((email_autolink) @md-ts--fontify-autolink))
 
    :language 'markdown-inline
    :feature 'paragraph-inline
@@ -1219,6 +1460,192 @@ VALUE non-nil hides markup, nil shows it."
   (setq md-ts-hide-markup (not md-ts-hide-markup))
   (md-ts--set-hide-markup md-ts-hide-markup))
 
+(defun md-ts--node-at (pos language)
+  "Return the tree-sitter node at POS for LANGUAGE, ignoring errors."
+  (ignore-errors
+    (treesit-node-at pos language)))
+
+(defun md-ts--node-in-link-reference-definition-p (node)
+  "Return non-nil if NODE is inside a link reference definition."
+  (while (and node
+              (not (string= (treesit-node-type node)
+                            "link_reference_definition")))
+    (setq node (treesit-node-parent node)))
+  node)
+
+(defun md-ts--line-bounds (beg end)
+  "Return widened line bounds covering BEG through END."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (let ((safe-beg (min (max beg (point-min)) (point-max)))
+            (safe-end (min (max end (point-min)) (point-max))))
+        (goto-char safe-beg)
+        (let ((line-beg (line-beginning-position)))
+          (goto-char safe-end)
+          (when (and (> safe-end safe-beg) (bolp))
+            (forward-char -1))
+          (cons line-beg (line-end-position)))))))
+
+(defun md-ts--broadened-line-bounds (beg end)
+  "Return line bounds around BEG and END, broadened by one line."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (let ((safe-beg (min (max beg (point-min)) (point-max)))
+            (safe-end (min (max end (point-min)) (point-max))))
+        (goto-char safe-beg)
+        (forward-line -1)
+        (let ((line-beg (line-beginning-position)))
+          (goto-char safe-end)
+          (forward-line 1)
+          (cons line-beg (line-end-position)))))))
+
+(defun md-ts--region-has-link-reference-definition-node-p (beg end)
+  "Return non-nil if BEG to END intersects a parsed reference definition."
+  (save-restriction
+    (widen)
+    (pcase-let ((`(,line-beg . ,line-end)
+                 (md-ts--broadened-line-bounds beg end)))
+      (when-let* ((root (ignore-errors (treesit-buffer-root-node 'markdown))))
+        (treesit-query-capture root
+                               '((link_reference_definition) @definition)
+                               line-beg line-end)))))
+
+(defun md-ts--region-needs-adjacent-fence-lines-p (beg end)
+  "Return non-nil if fence detection around BEG and END needs adjacent lines.
+Newline edits can make a neighboring fence delimiter structural or
+non-structural without changing the delimiter text.  A zero-width
+BOL/EOL edit gets the same conservative treatment."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (let ((safe-beg (min (max beg (point-min)) (point-max)))
+            (safe-end (min (max end (point-min)) (point-max))))
+        (or (and (< safe-beg safe-end)
+                 (progn
+                   (goto-char safe-beg)
+                   (search-forward "\n" safe-end t)))
+            (and (= safe-beg safe-end)
+                 (progn
+                   (goto-char safe-beg)
+                   (or (bolp) (eolp)))))))))
+
+(defun md-ts--fence-detection-line-bounds (beg end)
+  "Return line bounds to inspect fence edits from BEG to END."
+  (if (md-ts--region-needs-adjacent-fence-lines-p beg end)
+      (md-ts--broadened-line-bounds beg end)
+    (md-ts--line-bounds beg end)))
+
+(defun md-ts--region-has-fenced-code-delimiter-node-p (beg end)
+  "Return non-nil for a parsed fence delimiter near BEG and END."
+  (save-restriction
+    (widen)
+    (pcase-let ((`(,line-beg . ,line-end)
+                 (md-ts--fence-detection-line-bounds beg end)))
+      (when-let* ((root (ignore-errors (treesit-buffer-root-node 'markdown))))
+        (treesit-query-capture root
+                               '((fenced_code_block_delimiter) @delimiter)
+                               line-beg line-end)))))
+
+(defun md-ts--region-has-markdown-fence-p (beg end)
+  "Return non-nil for a Markdown fence near BEG and END.
+Parser-recognized delimiter nodes catch valid container-indented
+fences, including nested-list fences whose absolute indentation is
+more than three columns.  The regexp fallback keeps simple newly
+typed delimiter text conservative if tree state is temporarily
+unavailable; it is not the source of container correctness."
+  (or (md-ts--region-has-fenced-code-delimiter-node-p beg end)
+      (save-restriction
+        (widen)
+        (pcase-let ((`(,line-beg . ,line-end)
+                     (md-ts--fence-detection-line-bounds beg end)))
+          (string-match-p
+           md-ts--markdown-fence-regexp
+           (buffer-substring-no-properties line-beg line-end))))))
+
+(defun md-ts--flush-all-font-lock ()
+  "Flush font-lock across the whole buffer, ignoring narrowing."
+  (save-restriction
+    (widen)
+    (font-lock-flush (point-min) (point-max))))
+
+(defun md-ts--before-change-check-link-reference-definition (beg end)
+  "Remember if the text from BEG to END can affect definitions."
+  (setq md-ts--link-reference-definition-change-p
+        (or (md-ts--region-has-link-reference-definition-node-p beg end)
+            (md-ts--region-has-markdown-fence-p beg end)
+            (md-ts--node-in-link-reference-definition-p
+             (md-ts--node-at beg 'markdown))
+            (and (> end beg)
+                 (md-ts--node-in-link-reference-definition-p
+                  (md-ts--node-at (1- end) 'markdown))))))
+
+(defun md-ts--after-change-flush-link-reference-links (beg end _length)
+  "Flush non-local link fontification after definition edits.
+BEG, END, and _LENGTH are the standard `after-change-functions'
+arguments.  Reference definitions affect buttons and `help-echo'
+far from the edited line, so real definition or fence changes flush
+all font-lock state."
+  (when (or md-ts--link-reference-definition-change-p
+            (md-ts--region-has-link-reference-definition-node-p beg end)
+            (md-ts--region-has-markdown-fence-p beg end))
+    (md-ts--flush-all-font-lock))
+  (setq md-ts--link-reference-definition-change-p nil))
+
+(defun md-ts--link-target-at-point (&optional pos)
+  "Return the parsed Markdown link target at POS, or nil.
+POS defaults to point.  This covers both visible link text and the
+parsed markup belonging to a link."
+  (let ((pos (or pos (point))))
+    (seq-some (lambda (node)
+                (and node (md-ts--link-target-for-node node)))
+              (list (md-ts--node-at pos 'markdown-inline)
+                    (md-ts--node-at pos 'markdown)))))
+
+(defun md-ts--open-link-button (button)
+  "Open Markdown link BUTTON by resolving its current parsed target."
+  (if-let* ((url (md-ts--link-target-at-point (button-start button))))
+      (md-ts--open-link-destination url)
+    (user-error "No Markdown link target at point")))
+
+(defun md-ts--ensure-link-fontification-at-point (&optional pos)
+  "Ensure font-lock and tree-sitter link state around POS.
+POS defaults to point.  Fontifying the containing line initializes
+Markdown-inline parser ranges and link button properties in fresh
+`md-ts-mode' buffers."
+  (save-excursion
+    (goto-char (or pos (point)))
+    (font-lock-ensure (line-beginning-position)
+                      (line-end-position))))
+
+(defun md-ts-open-link-at-point ()
+  "Open the Markdown link at point.
+If point is on buttonized link text, activate that button.  If
+point is on parsed Markdown link markup, resolve the same target
+and open it with `md-ts--open-link-destination'.  Signal a
+`user-error' when point is not on a supported Markdown link."
+  (interactive)
+  (let ((button (button-at (point))))
+    ;; Refresh missing or md-ts-owned buttons, but leave unrelated text
+    ;; buttons to normal `push-button' behavior.
+    (when (or (not button)
+              (eq (button-get button 'action) #'md-ts--open-link-button))
+      (md-ts--ensure-link-fontification-at-point)
+      (setq button (button-at (point))))
+    (if button
+        (push-button (point))
+      (let ((url (md-ts--link-target-at-point)))
+        (if url
+            (md-ts--open-link-destination url)
+          (user-error "No Markdown link at point"))))))
+
+(defvar md-ts-mode-map (make-sparse-keymap)
+  "Keymap for `md-ts-mode'.")
+
+(set-keymap-parent md-ts-mode-map text-mode-map)
+(define-key md-ts-mode-map (kbd "C-c C-o") #'md-ts-open-link-at-point)
+
 ;;; Major mode
 
 (defun md-ts-setup ()
@@ -1229,6 +1656,10 @@ VALUE non-nil hides markup, nil shows it."
   (setq-local font-lock-extra-managed-props
               (seq-uniq (append '(invisible button category action help-echo)
                                 font-lock-extra-managed-props)))
+  (add-hook 'before-change-functions
+            #'md-ts--before-change-check-link-reference-definition nil t)
+  (add-hook 'after-change-functions
+            #'md-ts--after-change-flush-link-reference-links nil t)
 
   (when (treesit-ready-p 'html t)
     (treesit-parser-create 'html)

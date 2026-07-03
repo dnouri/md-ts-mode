@@ -124,6 +124,36 @@ NTH selects occurrence (default 1)."
   (alist-get 'help-echo
              (md-ts-test--props-at text search '(help-echo) nth)))
 
+(defun md-ts-test--open-link-at-search (text search &optional nth)
+  "Run `md-ts-open-link-at-point' at SEARCH in markdown TEXT.
+NTH selects occurrence (default 1)."
+  (let ((buf (md-ts-test--fontify text))
+        (n (or nth 1)))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (dotimes (_ n)
+            (search-forward search))
+          (goto-char (match-beginning 0))
+          (md-ts-open-link-at-point))
+      (kill-buffer buf))))
+
+(defun md-ts-test--open-link-at-search-no-fontify (text search &optional nth)
+  "Run `md-ts-open-link-at-point' at SEARCH without pre-fontifying TEXT.
+NTH selects occurrence (default 1)."
+  (let ((buf (generate-new-buffer " *md-ts-test*"))
+        (n (or nth 1)))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert text)
+          (md-ts-mode)
+          (goto-char (point-min))
+          (dotimes (_ n)
+            (search-forward search))
+          (goto-char (match-beginning 0))
+          (md-ts-open-link-at-point))
+      (kill-buffer buf))))
+
 (defconst md-ts-test--repo-root
   (file-name-directory
    (directory-file-name
@@ -866,6 +896,1081 @@ inline parser ranges cause the first range's faces to be dropped."
               (should-not (get-text-property pos prop)))))
       (kill-buffer buf))))
 
+(ert-deftest md-ts-test-link-image-button ()
+  "Image descriptions should activate the image destination."
+  (let (opened)
+    (cl-letf (((symbol-function 'find-file)
+               (lambda (file &rest _args)
+                 (setq opened file)))
+              ((symbol-function 'browse-url)
+               (lambda (&rest _args)
+                 (ert-fail "browse-url called for image path"))))
+      (md-ts-test--push-button-at-search
+       "Check ![alt text](image.png) now.\n"
+       "alt text"))
+    (should (equal opened "image.png"))))
+
+(ert-deftest md-ts-test-link-image-reference-button ()
+  "Reference-style images should activate the resolved definition."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (push url opened))))
+      (md-ts-test--push-button-at-search
+       "See ![Full][img].\n\n[img]: https://full.example/image.png\n"
+       "Full")
+      (md-ts-test--push-button-at-search
+       "See ![Collapsed][].\n\n[collapsed]: https://collapsed.example/image.png\n"
+       "Collapsed")
+      (md-ts-test--push-button-at-search
+       "See ![Shortcut].\n\n[shortcut]: https://shortcut.example/image.png\n"
+       "Shortcut"))
+    (should (equal (nreverse opened)
+                   '("https://full.example/image.png"
+                     "https://collapsed.example/image.png"
+                     "https://shortcut.example/image.png")))))
+
+(ert-deftest md-ts-test-link-image-alt-inline-link-uses-outer-target ()
+  "Inline link syntax inside image alt text should not leak its target."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--push-button-at-search
+       "See ![foo [bar](https://inner.example)](https://outer.example/img.png).\n"
+       "bar"))
+    (should (equal opened "https://outer.example/img.png"))))
+
+(ert-deftest md-ts-test-link-image-alt-reference-link-uses-outer-target ()
+  "Reference link syntax inside image alt text should not leak its target."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--push-button-at-search
+       (concat "See ![foo [bar][inner]](https://outer.example/img.png).\n\n"
+               "[inner]: https://inner.example\n")
+       "bar"))
+    (should (equal opened "https://outer.example/img.png"))))
+
+(ert-deftest md-ts-test-link-image-alt-autolink-uses-outer-target ()
+  "Autolink syntax inside image alt text should not leak its target."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--push-button-at-search
+       "See ![foo <https://inner.example>](https://outer.example/img.png).\n"
+       "https://inner.example"))
+    (should (equal opened "https://outer.example/img.png"))))
+
+(ert-deftest md-ts-test-link-image-inside-inline-link-uses-outer-target ()
+  "Image alt text inside an inline link should open the enclosing link."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url)))
+              ((symbol-function 'find-file)
+               (lambda (&rest _args)
+                 (ert-fail "find-file called for nested image target"))))
+      (md-ts-test--push-button-at-search
+       "[![Alt](image.png)](https://outer.example)\n"
+       "Alt"))
+    (should (equal opened "https://outer.example"))))
+
+(ert-deftest md-ts-test-link-image-inside-reference-link-uses-outer-target ()
+  "Image alt text inside a reference link should open the enclosing link."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url)))
+              ((symbol-function 'find-file)
+               (lambda (&rest _args)
+                 (ert-fail "find-file called for nested image target"))))
+      (md-ts-test--push-button-at-search
+       (concat "[![Alt](image.png)][outer]\n\n"
+               "[outer]: https://outer.example\n")
+       "Alt"))
+    (should (equal opened "https://outer.example"))))
+
+(ert-deftest md-ts-test-link-autolink-inside-inline-link-uses-outer-target ()
+  "Autolink text inside an inline link should open the enclosing link."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--push-button-at-search
+       "[<https://inner.example>](https://outer.example)\n"
+       "https://inner.example"))
+    (should (equal opened "https://outer.example"))))
+
+(ert-deftest md-ts-test-link-autolink-inside-reference-link-uses-outer-target ()
+  "Autolink text inside a reference link should open the enclosing link."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--push-button-at-search
+       (concat "[<https://inner.example>][outer]\n\n"
+               "[outer]: https://outer.example\n")
+       "https://inner.example"))
+    (should (equal opened "https://outer.example"))))
+
+(ert-deftest md-ts-test-link-full-reference-button ()
+  "Full reference links should activate the resolved definition."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--push-button-at-search
+       "See [Python docs][py] now.\n\n[py]: https://python.org\n"
+       "Python docs"))
+    (should (equal opened "https://python.org"))))
+
+(ert-deftest md-ts-test-link-reference-label-normalization ()
+  "Reference labels should be whitespace-folded and simply downcased."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--push-button-at-search
+       "See [Topic][FOO   BAR].\n\n[ foo bar ]: https://example.com\n"
+       "Topic"))
+    (should (equal opened "https://example.com"))))
+
+(ert-deftest md-ts-test-link-reference-label-escaped-punctuation-distinct ()
+  "Escaped punctuation in reference labels should remain distinct."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (push url opened))))
+      (md-ts-test--push-button-at-search
+       (concat "See [Escaped][a\\*b] and [Plain][a*b].\n\n"
+               "[a\\*b]: https://escaped.example\n"
+               "[a*b]: https://plain.example\n")
+       "Escaped")
+      (md-ts-test--push-button-at-search
+       (concat "See [Escaped][a\\*b] and [Plain][a*b].\n\n"
+               "[a\\*b]: https://escaped.example\n"
+               "[a*b]: https://plain.example\n")
+       "Plain"))
+    (should (equal (nreverse opened)
+                   '("https://escaped.example"
+                     "https://plain.example")))))
+
+(ert-deftest md-ts-test-link-reference-label-escaped-bracket-literal ()
+  "Escaped brackets in reference labels should match literally."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--push-button-at-search
+       (concat "See [Doc][foo\\]bar].\n\n"
+               "[foo]: https://prefix.example\n"
+               "[foo\\]bar]: https://escaped-bracket.example\n")
+       "Doc"))
+    (should (equal opened "https://escaped-bracket.example"))))
+
+(ert-deftest md-ts-test-link-reference-label-key-preserves-escaped-brackets ()
+  "Reference label keys should keep escaped brackets distinct."
+  (should-not (equal (md-ts--reference-label-key "[a\\[b]")
+                     (md-ts--reference-label-key "[a[b]")))
+  (should-not (equal (md-ts--reference-label-key "[a\\]b]")
+                     (md-ts--reference-label-key "[a]b]"))))
+
+(ert-deftest md-ts-test-link-reference-first-definition-wins ()
+  "Reference resolution should use the first matching definition."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--push-button-at-search
+       "See [Doc][dup].\n\n[dup]: https://first.example\n[dup]: https://second.example\n"
+       "Doc"))
+    (should (equal opened "https://first.example"))))
+
+(ert-deftest md-ts-test-link-reference-cache-rebuilds-after-edit ()
+  "Reference definition edits should rebuild cached button targets."
+  (let ((buf (md-ts-test--fontify
+              "See [Doc][id].\n\n[id]: https://old.example\n"))
+        opened)
+    (unwind-protect
+        (cl-letf (((symbol-function 'browse-url)
+                   (lambda (url &rest _args)
+                     (push url opened))))
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (push-button (match-beginning 0))
+            (goto-char (point-min))
+            (search-forward "https://old.example")
+            (replace-match "https://new.example" t t)
+            ;; Do not refontify the referring link text here.  Its
+            ;; existing button action must resolve through the fresh
+            ;; reference cache at activation time.
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (push-button (match-beginning 0))))
+      (kill-buffer buf))
+    (should (equal (nreverse opened)
+                   '("https://old.example" "https://new.example")))))
+
+(ert-deftest md-ts-test-link-reference-cache-rebuilds-after-unrelated-edit ()
+  "Any text edit should invalidate the reference cache by buffer tick."
+  (let ((buf (md-ts-test--fontify
+              "See [Doc][id].\n\n[id]: https://cached.example\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (let ((cache (md-ts--link-reference-definitions))
+                (tick md-ts--link-reference-definitions-cache-tick))
+            (goto-char (point-min))
+            (insert "Intro line.\n")
+            (should (equal md-ts--link-reference-definitions-cache-tick
+                           tick))
+            (should-not (equal tick (buffer-chars-modified-tick)))
+            (should (equal (md-ts--resolve-link-reference "[id]")
+                           "https://cached.example"))
+            (should-not (eq cache md-ts--link-reference-definitions-cache))
+            (should (equal md-ts--link-reference-definitions-cache-tick
+                           (buffer-chars-modified-tick)))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-cache-widens-before-rebuild ()
+  "First cache rebuild while narrowed should not poison widening."
+  (let ((buf (generate-new-buffer " *md-ts-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "See [Doc][id].\n\n[id]: https://wide.example\n")
+          (md-ts-mode)
+          (goto-char (point-min))
+          (forward-line 1)
+          (narrow-to-region (point-min) (point))
+          (let ((narrowed-result (md-ts--resolve-link-reference "[id]")))
+            (widen)
+            (should (equal (md-ts--resolve-link-reference "[id]")
+                           "https://wide.example"))
+            (should (equal narrowed-result "https://wide.example"))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-cache-widens-before-duplicates ()
+  "A narrowed first rebuild should still let the first definition win."
+  (let ((buf (generate-new-buffer " *md-ts-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert (concat "[dup]: https://first.example\n\n"
+                          "[dup]: https://second.example\n"))
+          (md-ts-mode)
+          (goto-char (point-min))
+          (search-forward "second.example")
+          (narrow-to-region (line-beginning-position)
+                            (line-end-position))
+          (let ((narrowed-result (md-ts--resolve-link-reference "[dup]")))
+            (widen)
+            (should (equal (md-ts--resolve-link-reference "[dup]")
+                           "https://first.example"))
+            (should (equal narrowed-result "https://first.example"))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-cache-rebuilds-after-fence-insertion ()
+  "Inserting a fence before a distant definition should unresolve links."
+  (let ((buf (md-ts-test--fontify
+              "See [Doc][id].\n\n[id]: https://old.example\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (should (equal (md-ts--resolve-link-reference "[id]")
+                         "https://old.example"))
+          (goto-char (point-min))
+          (search-forward "Doc")
+          (should (button-at (match-beginning 0)))
+          (goto-char (point-min))
+          (search-forward "[id]:")
+          (beginning-of-line)
+          (insert "```\n")
+          (should-not (md-ts--resolve-link-reference "[id]"))
+          (font-lock-ensure)
+          (goto-char (point-min))
+          (search-forward "Doc")
+          (let ((pos (match-beginning 0)))
+            (should-not (button-at pos))
+            (should-not (get-text-property pos 'help-echo))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-cache-rebuilds-after-fence-removal ()
+  "Removing a fence before a distant definition should resolve links."
+  (let ((buf (md-ts-test--fontify
+              "See [Doc][id].\n\n```\n[id]: https://new.example\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (should-not (md-ts--resolve-link-reference "[id]"))
+          (goto-char (point-min))
+          (search-forward "Doc")
+          (should-not (button-at (match-beginning 0)))
+          (goto-char (point-min))
+          (search-forward "```")
+          (delete-region (line-beginning-position)
+                         (min (1+ (line-end-position)) (point-max)))
+          (should (equal (md-ts--resolve-link-reference "[id]")
+                         "https://new.example"))
+          (font-lock-ensure)
+          (goto-char (point-min))
+          (search-forward "Doc")
+          (let ((pos (match-beginning 0)))
+            (should (button-at pos))
+            (should (equal (get-text-property pos 'help-echo)
+                           "https://new.example"))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-blockquote-fence-insertion-flushes-stale-links ()
+  "Inserting a blockquote fence should flush stale link props."
+  (let ((buf (md-ts-test--fontify
+              "See [Doc][id].\n\n> [id]: https://old.example\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "Doc")
+          (let ((pos (match-beginning 0)))
+            (should (button-at pos))
+            (should (equal (get-text-property pos 'help-echo)
+                           "https://old.example")))
+          (goto-char (point-min))
+          (search-forward "> [id]:")
+          (beginning-of-line)
+          (insert "> ```\n")
+          (should-not (md-ts--resolve-link-reference "[id]"))
+          ;; The changed line is away from the referring link.  Without a
+          ;; structural fence flush, the old button/help would survive until
+          ;; incidental refontification; the command must refresh it first.
+          (goto-char (point-min))
+          (search-forward "Doc")
+          (goto-char (match-beginning 0))
+          (cl-letf (((symbol-function 'browse-url)
+                     (lambda (&rest _args)
+                       (ert-fail "browse-url called for fenced reference")))
+                    ((symbol-function 'find-file)
+                     (lambda (&rest _args)
+                       (ert-fail "find-file called for fenced reference")))
+                    ((symbol-function 'url-mailto)
+                     (lambda (&rest _args)
+                       (ert-fail "url-mailto called for fenced reference"))))
+            (should-error (md-ts-open-link-at-point) :type 'user-error))
+          (let ((pos (point)))
+            (should-not (button-at pos))
+            (should-not (get-text-property pos 'help-echo)))
+          (font-lock-ensure)
+          (goto-char (point-min))
+          (search-forward "Doc")
+          (let ((pos (match-beginning 0)))
+            (should-not (button-at pos))
+            (should-not (get-text-property pos 'help-echo))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-blockquote-fence-removal-flushes-stale-links ()
+  "Removing a blockquote fence should flush stale link props."
+  (let ((buf (md-ts-test--fontify
+              (concat "See [Doc][id].\n\n"
+                      "> ```\n"
+                      "> code\n"
+                      "> ```\n"
+                      "> [id]: https://new.example\n"
+                      "[id]: https://old.example\n"))))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "Doc")
+          (let ((pos (match-beginning 0)))
+            (should (button-at pos))
+            (should (equal (get-text-property pos 'help-echo)
+                           "https://new.example")))
+          (goto-char (point-min))
+          (search-forward "> ```" nil nil 2)
+          (delete-region (line-beginning-position)
+                         (min (1+ (line-end-position)) (point-max)))
+          (should (equal (md-ts--resolve-link-reference "[id]")
+                         "https://old.example"))
+          ;; The old help text pointed at the now-hidden blockquote
+          ;; definition.  The command should force the flushed referring line
+          ;; current before any incidental refontification.
+          (goto-char (point-min))
+          (search-forward "Doc")
+          (goto-char (match-beginning 0))
+          (let (opened)
+            (cl-letf (((symbol-function 'browse-url)
+                       (lambda (url &rest _args)
+                         (setq opened url))))
+              (md-ts-open-link-at-point))
+            (should (equal opened "https://old.example")))
+          (let ((pos (point)))
+            (should (button-at pos))
+            (should (equal (get-text-property pos 'help-echo)
+                           "https://old.example")))
+          (font-lock-ensure)
+          (goto-char (point-min))
+          (search-forward "Doc")
+          (let ((pos (match-beginning 0)))
+            (should (button-at pos))
+            (should (equal (get-text-property pos 'help-echo)
+                           "https://old.example"))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-nested-list-fence-insertion-flushes-stale-links ()
+  "Inserting a nested-list fence should flush stale link props."
+  (let ((buf (md-ts-test--fontify
+              (concat "See [Doc][id].\n\n"
+                      "- item\n"
+                      "  - sub\n\n"
+                      "      [id]: https://old.example\n")))
+        (original-flush (symbol-function 'font-lock-flush))
+        full-flushes)
+    (unwind-protect
+        (cl-letf (((symbol-function 'font-lock-flush)
+                   (lambda (&optional beg end)
+                     (when (and (equal beg (point-min))
+                                (equal end (point-max)))
+                       (push t full-flushes))
+                     (funcall original-flush beg end))))
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (let ((pos (match-beginning 0)))
+              (should (button-at pos))
+              (should (equal (get-text-property pos 'help-echo)
+                             "https://old.example")))
+            (goto-char (point-min))
+            (search-forward "  - sub")
+            (end-of-line)
+            (insert "\n      ```")
+            (should full-flushes)
+            (should-not (md-ts--resolve-link-reference "[id]"))
+            ;; The parser recognizes this delimiter even though it is indented
+            ;; more than three absolute columns for a nested list item.  The
+            ;; command should see the referring line was flushed before opening.
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (goto-char (match-beginning 0))
+            (cl-letf (((symbol-function 'browse-url)
+                       (lambda (&rest _args)
+                         (ert-fail "browse-url called for fenced reference")))
+                      ((symbol-function 'find-file)
+                       (lambda (&rest _args)
+                         (ert-fail "find-file called for fenced reference")))
+                      ((symbol-function 'url-mailto)
+                       (lambda (&rest _args)
+                         (ert-fail "url-mailto called for fenced reference"))))
+              (should-error (md-ts-open-link-at-point) :type 'user-error))
+            (let ((pos (point)))
+              (should-not (button-at pos))
+              (should-not (get-text-property pos 'help-echo)))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-nested-list-fence-removal-flushes-stale-links ()
+  "Removing a nested-list fence should flush stale link props."
+  (let ((buf (md-ts-test--fontify
+              (concat "See [Doc][id].\n\n"
+                      "- item\n"
+                      "  - sub\n"
+                      "      ```\n\n\n"
+                      "      [id]: https://new.example\n\n"
+                      "[id]: https://old.example\n")))
+        (original-flush (symbol-function 'font-lock-flush))
+        full-flushes)
+    (unwind-protect
+        (cl-letf (((symbol-function 'font-lock-flush)
+                   (lambda (&optional beg end)
+                     (when (and (equal beg (point-min))
+                                (equal end (point-max)))
+                       (push t full-flushes))
+                     (funcall original-flush beg end))))
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (let ((pos (match-beginning 0)))
+              (should (button-at pos))
+              (should (equal (get-text-property pos 'help-echo)
+                             "https://old.example")))
+            (goto-char (point-min))
+            (search-forward "```")
+            (delete-region (line-beginning-position)
+                           (min (1+ (line-end-position)) (point-max)))
+            (should full-flushes)
+            (should (equal (md-ts--resolve-link-reference "[id]")
+                           "https://new.example"))
+            ;; The dynamic action would open the new target either way; the
+            ;; help text proves the remote line was flushed before the command
+            ;; initialized it.
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (goto-char (match-beginning 0))
+            (let (opened)
+              (cl-letf (((symbol-function 'browse-url)
+                         (lambda (url &rest _args)
+                           (setq opened url))))
+                (md-ts-open-link-at-point))
+              (should (equal opened "https://new.example")))
+            (let ((pos (point)))
+              (should (button-at pos))
+              (should (equal (get-text-property pos 'help-echo)
+                             "https://new.example")))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-fence-split-before-delimiter-flushes-stale-links ()
+  "Splitting text before a fence delimiter should flush stale link props."
+  (let ((buf (md-ts-test--fontify
+              (concat "See [Doc][id].\n\n"
+                      "para```\n\n"
+                      "[id]: https://new.example\n"
+                      "```\n"
+                      "[id]: https://old.example\n")))
+        (original-flush (symbol-function 'font-lock-flush))
+        full-flushes)
+    (unwind-protect
+        (cl-letf (((symbol-function 'font-lock-flush)
+                   (lambda (&optional beg end)
+                     (when (and (equal beg (point-min))
+                                (equal end (point-max)))
+                       (push t full-flushes))
+                     (funcall original-flush beg end))))
+          (with-current-buffer buf
+            (should (equal (md-ts--resolve-link-reference "[id]")
+                           "https://new.example"))
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (let ((pos (match-beginning 0)))
+              (should (button-at pos))
+              (should (equal (get-text-property pos 'help-echo)
+                             "https://new.example")))
+            (goto-char (point-min))
+            (search-forward "para")
+            (insert "\n")
+            (should full-flushes)
+            (should (equal (md-ts--resolve-link-reference "[id]")
+                           "https://old.example"))
+            ;; No explicit refontification here: the command should refresh
+            ;; the flushed remote link before using its stale help/button.
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (goto-char (match-beginning 0))
+            (let (opened)
+              (cl-letf (((symbol-function 'browse-url)
+                         (lambda (url &rest _args)
+                           (setq opened url))))
+                (md-ts-open-link-at-point))
+              (should (equal opened "https://old.example")))
+            (let ((pos (point)))
+              (should (button-at pos))
+              (should (equal (get-text-property pos 'help-echo)
+                             "https://old.example")))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-fence-join-before-delimiter-flushes-stale-links ()
+  "Joining a fence delimiter onto text should flush stale link props."
+  (let ((buf (md-ts-test--fontify
+              (concat "See [Doc][id].\n\n"
+                      "para\n"
+                      "```\n\n"
+                      "[id]: https://new.example\n"
+                      "```\n"
+                      "[id]: https://old.example\n")))
+        (original-flush (symbol-function 'font-lock-flush))
+        full-flushes)
+    (unwind-protect
+        (cl-letf (((symbol-function 'font-lock-flush)
+                   (lambda (&optional beg end)
+                     (when (and (equal beg (point-min))
+                                (equal end (point-max)))
+                       (push t full-flushes))
+                     (funcall original-flush beg end))))
+          (with-current-buffer buf
+            (should (equal (md-ts--resolve-link-reference "[id]")
+                           "https://old.example"))
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (let ((pos (match-beginning 0)))
+              (should (button-at pos))
+              (should (equal (get-text-property pos 'help-echo)
+                             "https://old.example")))
+            (goto-char (point-min))
+            (search-forward "para")
+            (delete-char 1)
+            (should full-flushes)
+            (should (equal (md-ts--resolve-link-reference "[id]")
+                           "https://new.example"))
+            ;; No explicit refontification here: the command should refresh
+            ;; the flushed remote link before using its stale help/button.
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (goto-char (match-beginning 0))
+            (let (opened)
+              (cl-letf (((symbol-function 'browse-url)
+                         (lambda (url &rest _args)
+                           (setq opened url))))
+                (md-ts-open-link-at-point))
+              (should (equal opened "https://new.example")))
+            (let ((pos (point)))
+              (should (button-at pos))
+              (should (equal (get-text-property pos 'help-echo)
+                             "https://new.example")))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-definition-change-refontifies-links ()
+  "Definition edits should non-locally update reference link buttons."
+  (let ((buf (md-ts-test--fontify "See [Doc][id].\n"))
+        (original-flush (symbol-function 'font-lock-flush))
+        full-flushes
+        opened)
+    (unwind-protect
+        (cl-letf (((symbol-function 'browse-url)
+                   (lambda (url &rest _args)
+                     (push url opened)))
+                  ((symbol-function 'font-lock-flush)
+                   (lambda (&optional beg end)
+                     (when (and (equal beg (point-min))
+                                (equal end (point-max)))
+                       (push t full-flushes))
+                     (funcall original-flush beg end))))
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (should-not (button-at (match-beginning 0)))
+            (goto-char (point-max))
+            (insert "\n[id]: https://added.example\n")
+            (should full-flushes)
+            (font-lock-ensure)
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (let ((pos (match-beginning 0)))
+              (should (button-at pos))
+              (should (equal (get-text-property pos 'help-echo)
+                             "https://added.example"))
+              (push-button pos))
+            (setq full-flushes nil)
+            (goto-char (point-min))
+            (search-forward "[id]: https://added.example")
+            (delete-region (match-beginning 0) (line-end-position))
+            (should full-flushes)
+            (font-lock-ensure)
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (let ((pos (match-beginning 0)))
+              (should-not (button-at pos))
+              (should-not (get-text-property pos 'help-echo)))))
+      (kill-buffer buf))
+    (should (equal (nreverse opened) '("https://added.example")))))
+
+(ert-deftest md-ts-test-link-reference-definition-escaped-label-flushes ()
+  "Escaped labels in new definitions should trigger non-local flushing."
+  (let ((buf (md-ts-test--fontify "See [Doc][foo\\]bar].\n"))
+        (original-flush (symbol-function 'font-lock-flush))
+        full-flushes)
+    (unwind-protect
+        (cl-letf (((symbol-function 'font-lock-flush)
+                   (lambda (&optional beg end)
+                     (when (and (equal beg (point-min))
+                                (equal end (point-max)))
+                       (push t full-flushes))
+                     (funcall original-flush beg end))))
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (should-not (button-at (match-beginning 0)))
+            (goto-char (point-max))
+            (insert "\n[foo\\]bar]: https://escaped.example\n")
+            (should full-flushes)
+            (font-lock-ensure)
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (let ((pos (match-beginning 0)))
+              (should (button-at pos))
+              (should (equal (get-text-property pos 'help-echo)
+                             "https://escaped.example")))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-definition-enclosed-escaped-delete-flushes ()
+  "Deleting a region enclosing an escaped-label definition should flush links."
+  (let ((buf (md-ts-test--fontify
+              (concat "See [Doc][foo\\]bar].\n\n"
+                      "before\n\n"
+                      "[foo\\]bar]: https://old.example\n\n"
+                      "after\n")))
+        (original-flush (symbol-function 'font-lock-flush))
+        full-flushes)
+    (unwind-protect
+        (cl-letf (((symbol-function 'font-lock-flush)
+                   (lambda (&optional beg end)
+                     (when (and (equal beg (point-min))
+                                (equal end (point-max)))
+                       (push t full-flushes))
+                     (funcall original-flush beg end))))
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (should (equal (get-text-property (match-beginning 0) 'help-echo)
+                           "https://old.example"))
+            (goto-char (point-min))
+            (search-forward "before")
+            (let ((beg (match-beginning 0)))
+              (search-forward "after")
+              (delete-region beg (line-end-position)))
+            (should full-flushes)
+            (font-lock-ensure)
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (let ((pos (match-beginning 0)))
+              (should-not (button-at pos))
+              (should-not (get-text-property pos 'help-echo)))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-definition-enclosed-escaped-replace-flushes ()
+  "Replacing a region enclosing an escaped-label definition should flush links."
+  (let ((buf (md-ts-test--fontify
+              (concat "See [Doc][foo\\]bar].\n\n"
+                      "before\n\n"
+                      "[foo\\]bar]: https://old.example\n\n"
+                      "after\n")))
+        (original-flush (symbol-function 'font-lock-flush))
+        full-flushes)
+    (unwind-protect
+        (cl-letf (((symbol-function 'font-lock-flush)
+                   (lambda (&optional beg end)
+                     (when (and (equal beg (point-min))
+                                (equal end (point-max)))
+                       (push t full-flushes))
+                     (funcall original-flush beg end))))
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (should (button-at (match-beginning 0)))
+            (goto-char (point-min))
+            (search-forward (concat "before\n\n"
+                                    "[foo\\]bar]: https://old.example\n\n"
+                                    "after"))
+            (replace-match "replacement" t t)
+            (should full-flushes)
+            (font-lock-ensure)
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (let ((pos (match-beginning 0)))
+              (should-not (button-at pos))
+              (should-not (get-text-property pos 'help-echo)))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-definition-change-updates-help-echo ()
+  "Destination edits should non-locally refresh reference help text."
+  (let ((buf (md-ts-test--fontify
+              "See [Doc][id].\n\n[id]: https://old.example\n"))
+        (original-flush (symbol-function 'font-lock-flush))
+        full-flushes)
+    (unwind-protect
+        (cl-letf (((symbol-function 'font-lock-flush)
+                   (lambda (&optional beg end)
+                     (when (and (equal beg (point-min))
+                                (equal end (point-max)))
+                       (push t full-flushes))
+                     (funcall original-flush beg end))))
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (should (equal (get-text-property (match-beginning 0) 'help-echo)
+                           "https://old.example"))
+            (goto-char (point-min))
+            (search-forward "https://old.example")
+            (replace-match "https://new.example" t t)
+            (should full-flushes)
+            (font-lock-ensure)
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (should (equal (get-text-property (match-beginning 0) 'help-echo)
+                           "https://new.example"))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-definition-add-flushes-while-narrowed ()
+  "Adding a definition while narrowed should refresh links outside it."
+  (let ((buf (md-ts-test--fontify "See [Doc][id].\n\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "Doc")
+          (should-not (button-at (match-beginning 0)))
+          (narrow-to-region (point-max) (point-max))
+          (goto-char (point-max))
+          (insert "[id]: https://narrow.example\n")
+          (widen)
+          (font-lock-ensure)
+          (goto-char (point-min))
+          (search-forward "Doc")
+          (let ((pos (match-beginning 0)))
+            (should (button-at pos))
+            (should (equal (get-text-property pos 'help-echo)
+                           "https://narrow.example"))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-definition-remove-flushes-while-narrowed ()
+  "Removing a definition while narrowed should refresh links outside it."
+  (let ((buf (md-ts-test--fontify
+              "See [Doc][id].\n\n[id]: https://old.example\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "Doc")
+          (should (button-at (match-beginning 0)))
+          (goto-char (point-min))
+          (search-forward "[id]:")
+          (narrow-to-region (line-beginning-position) (point-max))
+          (delete-region (point-min) (point-max))
+          (widen)
+          (font-lock-ensure)
+          (goto-char (point-min))
+          (search-forward "Doc")
+          (let ((pos (match-beginning 0)))
+            (should-not (button-at pos))
+            (should-not (get-text-property pos 'help-echo))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-definition-in-fence-does-not-flush ()
+  "Editing definition-like code should not cause a full link flush."
+  (let ((buf (md-ts-test--fontify
+              (concat "See [Doc][id].\n\n"
+                      "[id]: https://live.example\n\n"
+                      "```\n"
+                      "[notdef]: https://old.example\n"
+                      "```\n")))
+        (original-flush (symbol-function 'font-lock-flush))
+        full-flushes)
+    (unwind-protect
+        (cl-letf (((symbol-function 'font-lock-flush)
+                   (lambda (&optional beg end)
+                     (when (and (equal beg (point-min))
+                                (equal end (point-max)))
+                       (push t full-flushes))
+                     (funcall original-flush beg end))))
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (search-forward "https://old.example")
+            (replace-match "https://still-code.example" t t)
+            (should-not full-flushes)
+            (should (equal (md-ts--resolve-link-reference "[id]")
+                           "https://live.example"))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-collapsed-reference-button ()
+  "Collapsed reference links should use their link text as the label."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--push-button-at-search
+       "See [Python][].\n\n[python]: https://python.org\n"
+       "Python"))
+    (should (equal opened "https://python.org"))))
+
+(ert-deftest md-ts-test-link-shortcut-reference-button ()
+  "Shortcut reference links should use their link text as the label."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--push-button-at-search
+       "See [Python].\n\n[python]: https://python.org\n"
+       "Python"))
+    (should (equal opened "https://python.org"))))
+
+(ert-deftest md-ts-test-link-missing-reference-is-not-buttonized ()
+  "Missing reference links should keep `link' face without a bogus button."
+  (let ((text "See [Missing][nope].\n"))
+    (should (md-ts-test--has-face text "Missing" 'link))
+    (should-not (md-ts-test--button-at-search text "Missing"))))
+
+(ert-deftest md-ts-test-link-reference-definition-label-button ()
+  "Reference definition labels should activate their destination."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--push-button-at-search
+       "[docs]: https://example.com/docs\n"
+       "docs"))
+    (should (equal opened "https://example.com/docs"))))
+
+(ert-deftest md-ts-test-link-reference-definition-destination-face ()
+  "Reference definition destinations should get string face."
+  (should (md-ts-test--has-face
+           "[docs]: https://example.com/docs\n"
+           "https://example.com/docs" 'font-lock-string-face)))
+
+(ert-deftest md-ts-test-link-uri-autolink-button ()
+  "URI autolinks should activate the inner target, not angle brackets."
+  (let ((text "Visit <https://example.com> now.\n")
+        opened)
+    (should (equal (md-ts-test--help-echo-at-search text "https://example.com")
+                   "https://example.com"))
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--push-button-at-search text "https://example.com"))
+    (should (equal opened "https://example.com"))
+    (let ((buf (md-ts-test--fontify text)))
+      (unwind-protect
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (search-forward "<")
+            (should-not (button-at (match-beginning 0)))
+            (search-forward "https://example.com")
+            (should (button-at (match-beginning 0)))
+            (search-forward ">")
+            (should-not (button-at (match-beginning 0))))
+        (kill-buffer buf)))))
+
+(ert-deftest md-ts-test-link-email-autolink-button ()
+  "Email autolinks should activate through a mailto URL."
+  (let ((text "Email <person@example.com> please.\n")
+        mailed)
+    (should (equal (md-ts-test--help-echo-at-search text "person@example.com")
+                   "mailto:person@example.com"))
+    (cl-letf (((symbol-function 'url-mailto)
+               (lambda (parsed-url)
+                 (setq mailed (list (url-type parsed-url)
+                                    (url-filename parsed-url)))))
+              ((symbol-function 'browse-url)
+               (lambda (&rest _args)
+                 (ert-fail "browse-url called for email autolink"))))
+      (md-ts-test--push-button-at-search text "person@example.com"))
+    (should (equal mailed '("mailto" "person@example.com")))))
+
+(ert-deftest md-ts-test-link-open-at-point-command ()
+  "`md-ts-open-link-at-point' should activate a buttonized link at point."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--open-link-at-search
+       "Visit [here](https://example.com) now.\n"
+       "here"))
+    (should (equal opened "https://example.com"))))
+
+(ert-deftest md-ts-test-link-open-at-point-on-markup ()
+  "`md-ts-open-link-at-point' should reuse parser targets on link markup."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--open-link-at-search
+       "Visit [here](https://example.com) now.\n"
+       "https://example.com"))
+    (should (equal opened "https://example.com"))))
+
+(ert-deftest md-ts-test-link-open-at-point-image ()
+  "`md-ts-open-link-at-point' should open image targets."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--open-link-at-search
+       "See ![Alt](https://example.com/image.png).\n"
+       "Alt"))
+    (should (equal opened "https://example.com/image.png"))))
+
+(ert-deftest md-ts-test-link-open-at-point-reference ()
+  "`md-ts-open-link-at-point' should open reference links."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--open-link-at-search
+       "See [Doc][id].\n\n[id]: https://example.com/ref\n"
+       "Doc"))
+    (should (equal opened "https://example.com/ref"))))
+
+(ert-deftest md-ts-test-link-open-at-point-no-fontify-inline ()
+  "`md-ts-open-link-at-point' should work before explicit fontification."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--open-link-at-search-no-fontify
+       "Visit [here](https://example.com) now.\n"
+       "here"))
+    (should (equal opened "https://example.com"))))
+
+(ert-deftest md-ts-test-link-open-at-point-no-fontify-reference ()
+  "`md-ts-open-link-at-point' should initialize reference-link state."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--open-link-at-search-no-fontify
+       "See [Doc][id].\n\n[id]: https://example.com/ref\n"
+       "Doc"))
+    (should (equal opened "https://example.com/ref"))))
+
+(ert-deftest md-ts-test-link-open-at-point-reference-definition ()
+  "`md-ts-open-link-at-point' should open reference definition labels."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--open-link-at-search
+       "[id]: https://example.com/def\n"
+       "id"))
+    (should (equal opened "https://example.com/def"))))
+
+(ert-deftest md-ts-test-link-open-at-point-autolink ()
+  "`md-ts-open-link-at-point' should open parsed autolinks."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--open-link-at-search
+       "Visit <https://example.com/auto>.\n"
+       "https://example.com/auto"))
+    (should (equal opened "https://example.com/auto"))))
+
+(ert-deftest md-ts-test-link-open-at-point-missing-reference ()
+  "`md-ts-open-link-at-point' should reject unresolved reference links."
+  (cl-letf (((symbol-function 'browse-url)
+             (lambda (&rest _args)
+               (ert-fail "browse-url called for unresolved reference")))
+            ((symbol-function 'find-file)
+             (lambda (&rest _args)
+               (ert-fail "find-file called for unresolved reference"))))
+    (should-error
+     (md-ts-test--open-link-at-search "See [Missing][nope].\n" "Missing")
+     :type 'user-error)))
+
+(ert-deftest md-ts-test-link-open-at-point-missing-link ()
+  "`md-ts-open-link-at-point' should clearly reject ordinary text."
+  (should-error
+   (md-ts-test--open-link-at-search "No links here.\n" "links")
+   :type 'user-error))
+
+(ert-deftest md-ts-test-link-open-at-point-key-binding ()
+  "`md-ts-mode-map' should bind the common open-link key."
+  (should (eq (lookup-key md-ts-mode-map (kbd "C-c C-o"))
+              #'md-ts-open-link-at-point)))
+
+(ert-deftest md-ts-test-link-open-at-point-key-binding-survives-reload ()
+  "Reloading after an older mode map exists should still install the key."
+  (let* ((expression
+          (mapconcat
+           #'identity
+           `("(progn"
+             "  (defvar md-ts-mode-map (make-sparse-keymap))"
+             ,(format "  (let ((old-map md-ts-mode-map)) (load %S nil t)"
+                      (expand-file-name "md-ts-mode.el" md-ts-test--repo-root))
+             ,(md-ts-test--batch-result-princ-form)
+             "    (prin1 (list"
+             "            :same-map (eq old-map md-ts-mode-map)"
+             "            :binding (eq (lookup-key md-ts-mode-map (kbd \"C-c C-o\"))"
+             "                         #'md-ts-open-link-at-point)"
+             "            :parent (eq (keymap-parent md-ts-mode-map) text-mode-map)))))")
+           " "))
+         (result (md-ts-test--read-batch-emacs-result expression)))
+    (should (eq t (plist-get result :same-map)))
+    (should (eq t (plist-get result :binding)))
+    (should (eq t (plist-get result :parent)))))
+
+(ert-deftest md-ts-test-link-open-at-point-map-inherits-text-mode ()
+  "`md-ts-mode-map' should keep `text-mode-map' as an ancestor."
+  (should (eq (keymap-parent md-ts-mode-map) text-mode-map)))
+
 (ert-deftest md-ts-test-full-reference-link ()
   "Full reference link [text][ref] should get `link' face on text."
   (should (md-ts-test--has-face
@@ -927,6 +2032,15 @@ inline parser ranges cause the first range's faces to be dropped."
     (should (md-ts-test--button-at-search
              "Visit [here](http://example.com) now.\n"
              "here"))))
+
+(ert-deftest md-ts-test-hide-markup-link-autolink-angles ()
+  "With hide-markup, autolinks should hide only angle brackets."
+  (let ((md-ts-hide-markup t)
+        (text "Visit <https://example.com> now.\n"))
+    (should (eq (md-ts-test--invisible-at text "<") 'md-ts--markup))
+    (should (eq (md-ts-test--invisible-at text ">") 'md-ts--markup))
+    (should-not (md-ts-test--invisible-at text "https://example.com"))
+    (should (md-ts-test--button-at-search text "https://example.com"))))
 
 (ert-deftest md-ts-test-hide-markup-image ()
   "With hide-markup, image URL and delimiters should be invisible."
