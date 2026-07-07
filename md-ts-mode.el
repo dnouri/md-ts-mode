@@ -1015,18 +1015,19 @@ not supported yet."
      (t
       (find-file (md-ts--local-link-file url))))))
 
-(defun md-ts--make-link-button (beg end url &optional dynamic)
+(defun md-ts--make-link-button (beg end url &optional _dynamic)
   "Make the text from BEG to END open URL as a standard button.
-When DYNAMIC is non-nil, resolve the parsed Markdown link target
-again at activation time.  This keeps reference-link buttons fresh
-when definitions elsewhere in the buffer change."
+URL is used for help text; activation resolves the parsed Markdown
+link target again so reference buttons stay fresh when definitions
+elsewhere in the buffer change."
   (when (and (< beg end) (not (string-empty-p url)))
-    (make-text-button beg end
-                      'action (if dynamic
-                                  #'md-ts--open-link-button
-                                (lambda (_button)
-                                  (md-ts--open-link-destination url)))
-                      'help-echo url)))
+    (if (md-ts--foreign-button-in-region-p beg end)
+        (md-ts--remove-link-button-properties beg end)
+      (make-text-button beg end
+                        'md-ts-link-button t
+                        'md-ts-link-help-echo url
+                        'action #'md-ts--open-link-button
+                        'help-echo url))))
 
 (defconst md-ts--link-node-types
   '("inline_link" "image" "full_reference_link"
@@ -1465,6 +1466,20 @@ VALUE non-nil hides markup, nil shows it."
   (ignore-errors
     (treesit-node-at pos language)))
 
+(defun md-ts--node-contains-position-p (node pos)
+  "Return non-nil if NODE includes POS as a character position."
+  (and node
+       (<= (treesit-node-start node) pos)
+       (< pos (treesit-node-end node))))
+
+(defun md-ts--node-at-containing-position (pos language)
+  "Return the nearest node for LANGUAGE that includes POS."
+  (let ((node (md-ts--node-at pos language)))
+    (while (and node
+                (not (md-ts--node-contains-position-p node pos)))
+      (setq node (treesit-node-parent node)))
+    node))
+
 (defun md-ts--node-in-link-reference-definition-p (node)
   "Return non-nil if NODE is inside a link reference definition."
   (while (and node
@@ -1500,6 +1515,18 @@ VALUE non-nil hides markup, nil shows it."
           (goto-char safe-end)
           (forward-line 1)
           (cons line-beg (line-end-position)))))))
+
+(defun md-ts--region-contains-newline-p (beg end)
+  "Return non-nil if the region from BEG to END has a newline."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (let ((safe-beg (min (max beg (point-min)) (point-max)))
+            (safe-end (min (max end (point-min)) (point-max))))
+        (and (< safe-beg safe-end)
+             (progn
+               (goto-char safe-beg)
+               (search-forward "\n" safe-end t)))))))
 
 (defun md-ts--region-has-link-reference-definition-node-p (beg end)
   "Return non-nil if BEG to END intersects a parsed reference definition."
@@ -1564,6 +1591,57 @@ unavailable; it is not the source of container correctness."
            md-ts--markdown-fence-regexp
            (buffer-substring-no-properties line-beg line-end))))))
 
+(defun md-ts--line-start-at-pos (pos)
+  "Return the start position of the line containing POS."
+  (save-excursion
+    (goto-char (min (max pos (point-min)) (point-max)))
+    (line-beginning-position)))
+
+(defun md-ts--region-includes-line-start-p (line-start region-beg region-end)
+  "Return non-nil if REGION-BEG to REGION-END includes LINE-START."
+  (and (<= region-beg line-start)
+       (<= line-start region-end)))
+
+(defun md-ts--region-touches-node-boundary-line-p (node region-beg region-end)
+  "Return non-nil if REGION-BEG to REGION-END touches NODE boundary lines."
+  (let* ((node-start (treesit-node-start node))
+         (node-end (treesit-node-end node))
+         (start-line (md-ts--line-start-at-pos node-start))
+         (end-line (md-ts--line-start-at-pos
+                    (max node-start (1- node-end)))))
+    (or (md-ts--region-includes-line-start-p
+         start-line region-beg region-end)
+        (md-ts--region-includes-line-start-p
+         end-line region-beg region-end))))
+
+(defun md-ts--region-touches-html-block-boundary-p
+    (beg end &optional broaden-touch)
+  "Return non-nil if BEG to END touches a parsed HTML block boundary.
+Discovery is broadened to find neighboring parsed HTML blocks, but
+only the actual changed lines count as boundary touches.  When
+BROADEN-TOUCH is non-nil, broaden touch bounds by one line too;
+callers use this only for actual newline insert/delete edits.
+Ordinary edits inside or next to a large HTML block should not
+force whole-buffer link refontification."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (pcase-let ((`(,touch-beg . ,touch-end)
+                   (if broaden-touch
+                       (md-ts--broadened-line-bounds beg end)
+                     (md-ts--line-bounds beg end)))
+                  (`(,discover-beg . ,discover-end)
+                   (md-ts--broadened-line-bounds beg end)))
+        (when-let* ((root (ignore-errors
+                            (treesit-buffer-root-node 'markdown))))
+          (seq-some
+           (lambda (capture)
+             (md-ts--region-touches-node-boundary-line-p
+              (cdr capture) touch-beg touch-end))
+           (treesit-query-capture root
+                                  '((html_block) @block)
+                                  discover-beg discover-end)))))))
+
 (defun md-ts--flush-all-font-lock ()
   "Flush font-lock across the whole buffer, ignoring narrowing."
   (save-restriction
@@ -1572,14 +1650,17 @@ unavailable; it is not the source of container correctness."
 
 (defun md-ts--before-change-check-link-reference-definition (beg end)
   "Remember if the text from BEG to END can affect definitions."
-  (setq md-ts--link-reference-definition-change-p
-        (or (md-ts--region-has-link-reference-definition-node-p beg end)
-            (md-ts--region-has-markdown-fence-p beg end)
-            (md-ts--node-in-link-reference-definition-p
-             (md-ts--node-at beg 'markdown))
-            (and (> end beg)
-                 (md-ts--node-in-link-reference-definition-p
-                  (md-ts--node-at (1- end) 'markdown))))))
+  (let ((newline-delete (md-ts--region-contains-newline-p beg end)))
+    (setq md-ts--link-reference-definition-change-p
+          (or (md-ts--region-has-link-reference-definition-node-p beg end)
+              (md-ts--region-has-markdown-fence-p beg end)
+              (md-ts--region-touches-html-block-boundary-p
+               beg end newline-delete)
+              (md-ts--node-in-link-reference-definition-p
+               (md-ts--node-at beg 'markdown))
+              (and (> end beg)
+                   (md-ts--node-in-link-reference-definition-p
+                    (md-ts--node-at (1- end) 'markdown)))))))
 
 (defun md-ts--after-change-flush-link-reference-links (beg end _length)
   "Flush non-local link fontification after definition edits.
@@ -1587,11 +1668,179 @@ BEG, END, and _LENGTH are the standard `after-change-functions'
 arguments.  Reference definitions affect buttons and `help-echo'
 far from the edited line, so real definition or fence changes flush
 all font-lock state."
-  (when (or md-ts--link-reference-definition-change-p
-            (md-ts--region-has-link-reference-definition-node-p beg end)
-            (md-ts--region-has-markdown-fence-p beg end))
-    (md-ts--flush-all-font-lock))
+  (let ((newline-insert (md-ts--region-contains-newline-p beg end)))
+    (when (or md-ts--link-reference-definition-change-p
+              (md-ts--region-has-link-reference-definition-node-p beg end)
+              (md-ts--region-has-markdown-fence-p beg end)
+              (md-ts--region-touches-html-block-boundary-p
+               beg end newline-insert))
+      (md-ts--flush-all-font-lock)))
   (setq md-ts--link-reference-definition-change-p nil))
+
+(defconst md-ts--link-button-properties
+  '(button nil category nil action nil help-echo nil keymap nil
+    mouse-face nil follow-link nil md-ts-link-button nil
+    md-ts-link-help-echo nil)
+  "Text properties owned by md-ts link buttons.")
+
+(defconst md-ts--link-button-residual-properties
+  '(md-ts-link-button nil md-ts-link-help-echo nil)
+  "Md-ts-specific link props that can remain under foreign buttons.")
+
+(defconst md-ts--link-button-segment-properties
+  '(button action category help-echo md-ts-link-button
+    md-ts-link-help-echo)
+  "Text properties that delimit md-ts link-button cleanup segments.")
+
+(defun md-ts--legacy-link-button-p (button)
+  "Return non-nil if BUTTON has c102465's dynamic md-ts shape."
+  (and (markerp button)
+       (not (button-get button 'md-ts-link-button))
+       (eq (button-get button 'action) #'md-ts--open-link-button)
+       (stringp (button-get button 'help-echo))))
+
+(defun md-ts--owned-link-button-p (button)
+  "Return non-nil if BUTTON is current or dynamic legacy md-ts UI."
+  (or (md-ts--link-button-p button)
+      (md-ts--legacy-link-button-p button)))
+
+(defun md-ts--foreign-overlay-button-in-region-p (beg end)
+  "Return non-nil if a foreign overlay button overlaps BEG to END."
+  (seq-some (lambda (overlay)
+              (and (overlay-get overlay 'button)
+                   (overlay-get overlay 'category)
+                   (not (md-ts--owned-link-button-p overlay))
+                   overlay))
+            (overlays-in beg end)))
+
+(defun md-ts--foreign-button-in-region-p (beg end)
+  "Return non-nil if a non-md-ts button overlaps BEG to END."
+  (or (md-ts--foreign-overlay-button-in-region-p beg end)
+      (let ((pos beg)
+            found)
+        (while (and (< pos end) (not found))
+          (if-let* ((button (button-at pos)))
+              (if (md-ts--owned-link-button-p button)
+                  (setq pos (min end (max (1+ pos) (button-end button))))
+                (setq found button))
+            (setq pos (or (next-single-property-change
+                           pos 'button nil end)
+                          end))))
+        found)))
+
+(defun md-ts--property-span (pos prop)
+  "Return the span of PROP around POS as a cons cell."
+  (cons (or (previous-single-property-change
+             (min (1+ pos) (point-max)) prop nil (point-min))
+            (point-min))
+        (or (next-single-property-change pos prop nil (point-max))
+            (point-max))))
+
+(defun md-ts--text-button-at-p (pos)
+  "Return non-nil if POS has a text-property button."
+  (and (get-text-property pos 'button)
+       (get-text-property pos 'category)))
+
+(defun md-ts--current-text-link-button-p (pos)
+  "Return non-nil if POS has a current md-ts text link button."
+  (and (md-ts--text-button-at-p pos)
+       (get-text-property pos 'md-ts-link-button)
+       (eq (get-text-property pos 'action) #'md-ts--open-link-button)))
+
+(defun md-ts--legacy-dynamic-text-link-button-p (pos)
+  "Return non-nil if POS has c102465's dynamic md-ts text button."
+  (and (md-ts--text-button-at-p pos)
+       (not (get-text-property pos 'md-ts-link-button))
+       (eq (get-text-property pos 'action) #'md-ts--open-link-button)
+       (stringp (get-text-property pos 'help-echo))))
+
+(defun md-ts--owned-text-link-button-p (pos)
+  "Return non-nil if POS has md-ts-owned text button props."
+  (or (md-ts--current-text-link-button-p pos)
+      (md-ts--legacy-dynamic-text-link-button-p pos)))
+
+(defun md-ts--link-residual-property-at-p (pos)
+  "Return non-nil if POS has md-ts link residual text props."
+  (or (get-text-property pos 'md-ts-link-button)
+      (get-text-property pos 'md-ts-link-help-echo)))
+
+(defun md-ts--stale-link-help-echo-p (pos)
+  "Return non-nil if POS has an md-ts-owned `help-echo' value."
+  (let ((help (get-text-property pos 'help-echo))
+        (owned-help (get-text-property pos 'md-ts-link-help-echo)))
+    (and owned-help (equal help owned-help))))
+
+(defun md-ts--next-link-button-property-change (pos limit)
+  "Return next possible link-button property change after POS before LIMIT."
+  (let ((next limit))
+    (dolist (prop md-ts--link-button-segment-properties next)
+      (setq next
+            (min next
+                 (or (next-single-property-change pos prop nil limit)
+                     limit))))))
+
+(defun md-ts--link-button-property-segment (pos)
+  "Return relevant link-button property segment around POS."
+  (let ((beg (point-min))
+        (end (point-max))
+        (previous-pos (min (1+ pos) (point-max))))
+    (dolist (prop md-ts--link-button-segment-properties)
+      (setq beg
+            (max beg
+                 (or (previous-single-property-change
+                      previous-pos prop nil (point-min))
+                     (point-min))))
+      (setq end
+            (min end
+                 (or (next-single-property-change
+                      pos prop nil (point-max))
+                     (point-max)))))
+    (cons beg end)))
+
+(defun md-ts--remove-link-residual-properties-at (pos)
+  "Remove stale md-ts residual link properties at POS.
+Return the end of the removed cleanup segment.  Foreign text button
+properties are not removed."
+  (pcase-let ((`(,span-beg . ,span-end)
+               (md-ts--link-button-property-segment pos)))
+    (when (md-ts--stale-link-help-echo-p pos)
+      (remove-text-properties span-beg span-end '(help-echo nil)))
+    (remove-text-properties span-beg span-end
+                            md-ts--link-button-residual-properties)
+    span-end))
+
+(defun md-ts--remove-link-button-properties (beg end)
+  "Remove md-ts-owned link button properties overlapping BEG to END.
+Foreign text and overlay buttons keep their button properties.  Any
+md-ts text button hidden under a foreign overlay is still removed,
+and stale md-ts-specific residual props left under foreign text
+buttons are cleared without taking ownership."
+  (with-silent-modifications
+    (save-restriction
+      (widen)
+      (let ((pos (min (max beg (point-min)) (point-max)))
+            (limit (min (max end (point-min)) (point-max))))
+        (while (< pos limit)
+          (cond
+           ((md-ts--owned-text-link-button-p pos)
+            (pcase-let ((`(,span-beg . ,span-end)
+                         (md-ts--property-span pos 'button)))
+              (remove-text-properties
+               span-beg span-end md-ts--link-button-properties)
+              (setq pos (min limit (max (1+ pos) span-end)))))
+           ((md-ts--link-residual-property-at-p pos)
+            (setq pos (min limit
+                            (max (1+ pos)
+                                 (md-ts--remove-link-residual-properties-at
+                                  pos)))))
+           (t
+            (setq pos (md-ts--next-link-button-property-change
+                       pos limit)))))))))
+
+(defun md-ts--font-lock-unfontify-region (beg end)
+  "Unfontify BEG to END and clean md-ts-owned link buttons."
+  (md-ts--remove-link-button-properties beg end)
+  (font-lock-default-unfontify-region beg end))
 
 (defun md-ts--link-target-at-point (&optional pos)
   "Return the parsed Markdown link target at POS, or nil.
@@ -1600,14 +1849,22 @@ parsed markup belonging to a link."
   (let ((pos (or pos (point))))
     (seq-some (lambda (node)
                 (and node (md-ts--link-target-for-node node)))
-              (list (md-ts--node-at pos 'markdown-inline)
-                    (md-ts--node-at pos 'markdown)))))
+              (list (md-ts--node-at-containing-position
+                     pos 'markdown-inline)
+                    (md-ts--node-at-containing-position
+                     pos 'markdown)))))
 
 (defun md-ts--open-link-button (button)
   "Open Markdown link BUTTON by resolving its current parsed target."
   (if-let* ((url (md-ts--link-target-at-point (button-start button))))
       (md-ts--open-link-destination url)
     (user-error "No Markdown link target at point")))
+
+(defun md-ts--link-button-p (button)
+  "Return non-nil if BUTTON is a current md-ts Markdown link button."
+  (and (markerp button)
+       (button-get button 'md-ts-link-button)
+       (eq (button-get button 'action) #'md-ts--open-link-button)))
 
 (defun md-ts--ensure-link-fontification-at-point (&optional pos)
   "Ensure font-lock and tree-sitter link state around POS.
@@ -1626,14 +1883,11 @@ point is on parsed Markdown link markup, resolve the same target
 and open it with `md-ts--open-link-destination'.  Signal a
 `user-error' when point is not on a supported Markdown link."
   (interactive)
+  (md-ts--ensure-link-fontification-at-point)
   (let ((button (button-at (point))))
-    ;; Refresh missing or md-ts-owned buttons, but leave unrelated text
-    ;; buttons to normal `push-button' behavior.
-    (when (or (not button)
-              (eq (button-get button 'action) #'md-ts--open-link-button))
-      (md-ts--ensure-link-fontification-at-point)
-      (setq button (button-at (point))))
-    (if button
+    ;; Only md-ts-owned text buttons are activated.  Foreign text or overlay
+    ;; buttons fall through to parser resolution, never to `push-button'.
+    (if (md-ts--link-button-p button)
         (push-button (point))
       (let ((url (md-ts--link-target-at-point)))
         (if url
@@ -1654,8 +1908,19 @@ and open it with `md-ts--open-link-destination'.  Signal a
   (setq-local treesit-font-lock-settings md-ts--treesit-settings)
   (setq-local treesit-range-settings (md-ts--range-settings))
   (setq-local font-lock-extra-managed-props
-              (seq-uniq (append '(invisible button category action help-echo)
-                                font-lock-extra-managed-props)))
+              (seq-uniq
+               (cons 'invisible
+                     (seq-remove
+                      (lambda (prop)
+                        (memq prop '(button category action help-echo
+                                     md-ts-link-button
+                                     md-ts-link-help-echo)))
+                      font-lock-extra-managed-props))))
+  (setq-local font-lock-unfontify-region-function
+              #'md-ts--font-lock-unfontify-region)
+  (save-restriction
+    (widen)
+    (md-ts--remove-link-button-properties (point-min) (point-max)))
   (add-hook 'before-change-functions
             #'md-ts--before-change-check-link-reference-definition nil t)
   (add-hook 'after-change-functions

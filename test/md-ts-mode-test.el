@@ -896,6 +896,159 @@ inline parser ranges cause the first range's faces to be dropped."
               (should-not (get-text-property pos prop)))))
       (kill-buffer buf))))
 
+(ert-deftest md-ts-test-link-multiline-button-cleanup-expands-span ()
+  "Partial unfontification should clean a whole md-ts multiline button."
+  (let ((buf (md-ts-test--fontify
+              "[foo\nbar](https://example.com)\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "foo")
+          (let ((first-pos (match-beginning 0))
+                second-pos)
+            (search-forward "bar")
+            (setq second-pos (match-beginning 0))
+            (should (button-at first-pos))
+            (should (button-at second-pos))
+            (funcall font-lock-unfontify-region-function
+                     (point-min) (save-excursion
+                                   (goto-char first-pos)
+                                   (line-end-position)))
+            (dolist (pos (list first-pos second-pos))
+              (should-not (button-at pos))
+              (should-not (get-text-property pos 'help-echo)))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-dynamic-legacy-button-cleaned-on-mode-setup ()
+  "c102465 dynamic md-ts buttons are removed when mode is enabled."
+  (let ((buf (generate-new-buffer " *md-ts-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "legacy button text.\n")
+          (goto-char (point-min))
+          (search-forward "button")
+          (let ((pos (match-beginning 0)))
+            (make-text-button pos (match-end 0)
+                              'action #'md-ts--open-link-button
+                              'help-echo "https://old.example")
+            (should (button-at pos))
+            (should-not (get-text-property pos 'md-ts-link-button))
+            (md-ts-mode)
+            (font-lock-ensure)
+            (should-not (button-at pos))
+            (dolist (prop '(button category action help-echo
+                                   md-ts-link-button
+                                   md-ts-link-help-echo))
+              (should-not (get-text-property pos prop)))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-mode-setup-cleans-buttons-outside-narrowing ()
+  "Mode setup should clean stale md-ts buttons in the whole buffer."
+  (let ((buf (generate-new-buffer " *md-ts-test*"))
+        called)
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "current outside\nvisible inside\nlegacy outside\nforeign outside\n")
+          (goto-char (point-min))
+          (search-forward "current")
+          (let ((current-pos (match-beginning 0))
+                (current-end (match-end 0))
+                legacy-pos legacy-end foreign-pos foreign-end
+                narrow-beg narrow-end)
+            (make-text-button current-pos current-end
+                              'md-ts-link-button t
+                              'md-ts-link-help-echo "https://old.example"
+                              'action #'md-ts--open-link-button
+                              'help-echo "https://old.example")
+            (search-forward "visible")
+            (setq narrow-beg (match-beginning 0)
+                  narrow-end (match-end 0))
+            (search-forward "legacy")
+            (setq legacy-pos (match-beginning 0)
+                  legacy-end (match-end 0))
+            (make-text-button legacy-pos legacy-end
+                              'action #'md-ts--open-link-button
+                              'help-echo "https://legacy.example")
+            (search-forward "foreign")
+            (setq foreign-pos (match-beginning 0)
+                  foreign-end (match-end 0))
+            (make-text-button foreign-pos foreign-end
+                              'action (lambda (_button)
+                                        (setq called t))
+                              'help-echo "foreign")
+            (narrow-to-region narrow-beg narrow-end)
+            (md-ts-mode)
+            (widen)
+            (dolist (pos (list current-pos legacy-pos))
+              (should-not (button-at pos))
+              (dolist (prop '(button category action help-echo
+                                     md-ts-link-button
+                                     md-ts-link-help-echo))
+                (should-not (get-text-property pos prop))))
+            (let ((button (button-at foreign-pos)))
+              (should button)
+              (should (equal (button-get button 'help-echo) "foreign"))
+              (push-button foreign-pos)
+              (should called))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-mode-setup-read-only-keeps-buffer-state ()
+  "Mode setup should silently clean stale buttons in read-only buffers."
+  (let ((buf (generate-new-buffer " *md-ts-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "stale link text\n")
+          (goto-char (point-min))
+          (search-forward "link")
+          (let ((pos (match-beginning 0))
+                (end (match-end 0))
+                (undo-list (list :sentinel)))
+            (make-text-button pos end
+                              'md-ts-link-button t
+                              'md-ts-link-help-echo "https://old.example"
+                              'action #'md-ts--open-link-button
+                              'help-echo "https://old.example")
+            (setq buffer-undo-list undo-list)
+            (set-buffer-modified-p nil)
+            (setq buffer-read-only t)
+            (md-ts-mode)
+            (should-not (buffer-modified-p))
+            (should (eq buffer-undo-list undo-list))
+            (should-not (button-at pos))
+            (dolist (prop '(button category action help-echo
+                                   md-ts-link-button md-ts-link-help-echo))
+              (should-not (get-text-property pos prop)))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-unfontify-read-only-keeps-buffer-state ()
+  "Unfontification should silently clean stale md-ts link buttons."
+  (let ((buf (generate-new-buffer " *md-ts-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "stale link text\n")
+          (md-ts-mode)
+          (goto-char (point-min))
+          (search-forward "link")
+          (let ((pos (match-beginning 0))
+                (end (match-end 0))
+                (undo-list (list :sentinel)))
+            (make-text-button pos end
+                              'md-ts-link-button t
+                              'md-ts-link-help-echo "https://old.example"
+                              'action #'md-ts--open-link-button
+                              'help-echo "https://old.example")
+            (setq buffer-undo-list undo-list)
+            (set-buffer-modified-p nil)
+            (setq buffer-read-only t)
+            (funcall font-lock-unfontify-region-function pos end)
+            (should-not (buffer-modified-p))
+            (should (eq buffer-undo-list undo-list))
+            (should-not (button-at pos))
+            (dolist (prop '(button category action help-echo
+                                   md-ts-link-button md-ts-link-help-echo))
+              (should-not (get-text-property pos prop)))))
+      (kill-buffer buf))))
+
 (ert-deftest md-ts-test-link-image-button ()
   "Image descriptions should activate the image destination."
   (let (opened)
@@ -1511,6 +1664,231 @@ inline parser ranges cause the first range's faces to be dropped."
                              "https://new.example")))))
       (kill-buffer buf))))
 
+(ert-deftest md-ts-test-link-reference-html-opener-insertion-flushes-stale-links ()
+  "Inserting a raw HTML opener should flush stale reference link props."
+  (let ((buf (md-ts-test--fontify
+              (concat "See [Doc][id].\n\n"
+                      "intro\n\n"
+                      "[id]: https://old.example\n")))
+        (original-flush (symbol-function 'font-lock-flush))
+        full-flushes)
+    (unwind-protect
+        (cl-letf (((symbol-function 'font-lock-flush)
+                   (lambda (&optional beg end)
+                     (when (and (equal beg (point-min))
+                                (equal end (point-max)))
+                       (push t full-flushes))
+                     (funcall original-flush beg end))))
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (let ((pos (match-beginning 0)))
+              (should (button-at pos))
+              (should (equal (get-text-property pos 'help-echo)
+                             "https://old.example")))
+            (goto-char (point-min))
+            (search-forward "intro")
+            (beginning-of-line)
+            (insert "<script>\n")
+            (should full-flushes)
+            (should-not (md-ts--resolve-link-reference "[id]"))
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (goto-char (match-beginning 0))
+            (cl-letf (((symbol-function 'browse-url)
+                       (lambda (&rest _args)
+                         (ert-fail "browse-url called for HTML-hidden reference")))
+                      ((symbol-function 'find-file)
+                       (lambda (&rest _args)
+                         (ert-fail "find-file called for HTML-hidden reference")))
+                      ((symbol-function 'url-mailto)
+                       (lambda (&rest _args)
+                         (ert-fail "url-mailto called for HTML-hidden reference"))))
+              (should-error (md-ts-open-link-at-point) :type 'user-error))
+            (let ((pos (point)))
+              (should-not (button-at pos))
+              (should-not (get-text-property pos 'help-echo)))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-html-opener-removal-flushes-stale-links ()
+  "Removing a raw HTML opener should flush stale reference link props."
+  (let ((buf (md-ts-test--fontify
+              (concat "See [Doc][id].\n\n"
+                      "<script>\n"
+                      "intro\n\n"
+                      "[id]: https://new.example\n")))
+        (original-flush (symbol-function 'font-lock-flush))
+        full-flushes)
+    (unwind-protect
+        (cl-letf (((symbol-function 'font-lock-flush)
+                   (lambda (&optional beg end)
+                     (when (and (equal beg (point-min))
+                                (equal end (point-max)))
+                       (push t full-flushes))
+                     (funcall original-flush beg end))))
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (should-not (button-at (match-beginning 0)))
+            (goto-char (point-min))
+            (search-forward "<script>")
+            (delete-region (line-beginning-position)
+                           (min (1+ (line-end-position)) (point-max)))
+            (should full-flushes)
+            (should (equal (md-ts--resolve-link-reference "[id]")
+                           "https://new.example"))
+            (font-lock-ensure)
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (let ((pos (match-beginning 0)))
+              (should (button-at pos))
+              (should (equal (get-text-property pos 'help-echo)
+                             "https://new.example")))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-html-opener-line-split-flushes-stale-links ()
+  "Splitting a paragraph before an HTML opener flushes stale refs."
+  (let ((buf (md-ts-test--fontify
+              (concat "See [Doc][id].\n\n"
+                      "para<script>\n\n"
+                      "[id]: https://old.example\n")))
+        (original-flush (symbol-function 'font-lock-flush))
+        full-flushes)
+    (unwind-protect
+        (cl-letf (((symbol-function 'font-lock-flush)
+                   (lambda (&optional beg end)
+                     (when (and (equal beg (point-min))
+                                (equal end (point-max)))
+                       (push t full-flushes))
+                     (funcall original-flush beg end))))
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (let ((pos (match-beginning 0)))
+              (should (button-at pos))
+              (should (equal (get-text-property pos 'help-echo)
+                             "https://old.example")))
+            (goto-char (point-min))
+            (search-forward "<script>")
+            (goto-char (match-beginning 0))
+            (insert "\n")
+            (should full-flushes)
+            (should-not (md-ts--resolve-link-reference "[id]"))
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (goto-char (match-beginning 0))
+            (cl-letf (((symbol-function 'browse-url)
+                       (lambda (&rest _args)
+                         (ert-fail "browse-url called for HTML-hidden reference")))
+                      ((symbol-function 'find-file)
+                       (lambda (&rest _args)
+                         (ert-fail "find-file called for HTML-hidden reference")))
+                      ((symbol-function 'url-mailto)
+                       (lambda (&rest _args)
+                         (ert-fail "url-mailto called for HTML-hidden reference"))))
+              (should-error (md-ts-open-link-at-point) :type 'user-error))
+            (let ((pos (point)))
+              (should-not (button-at pos))
+              (should-not (get-text-property pos 'help-echo)))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-html-opener-line-join-flushes-new-links ()
+  "Joining a paragraph with an HTML opener flushes newly visible refs."
+  (let ((buf (md-ts-test--fontify
+              (concat "See [Doc][id].\n\n"
+                      "para\n"
+                      "<script>\n\n"
+                      "[id]: https://new.example\n")))
+        (original-flush (symbol-function 'font-lock-flush))
+        full-flushes)
+    (unwind-protect
+        (cl-letf (((symbol-function 'font-lock-flush)
+                   (lambda (&optional beg end)
+                     (when (and (equal beg (point-min))
+                                (equal end (point-max)))
+                       (push t full-flushes))
+                     (funcall original-flush beg end))))
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (should-not (button-at (match-beginning 0)))
+            (should-not (md-ts--resolve-link-reference "[id]"))
+            (goto-char (point-min))
+            (search-forward "para")
+            (delete-char 1)
+            (should full-flushes)
+            (should (equal (md-ts--resolve-link-reference "[id]")
+                           "https://new.example"))
+            (font-lock-ensure)
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (let ((pos (match-beginning 0)))
+              (should (button-at pos))
+              (should (equal (get-text-property pos 'help-echo)
+                             "https://new.example")))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-html-inner-edit-does-not-flush ()
+  "Ordinary edits inside an HTML block should not flush all link props."
+  (let ((buf (md-ts-test--fontify
+              (concat "See [Doc][id].\n\n"
+                      "<script>\n"
+                      "line one\n"
+                      "line two\n"
+                      "line three\n"
+                      "</script>\n\n"
+                      "[id]: https://live.example\n")))
+        (original-flush (symbol-function 'font-lock-flush))
+        full-flushes)
+    (unwind-protect
+        (cl-letf (((symbol-function 'font-lock-flush)
+                   (lambda (&optional beg end)
+                     (when (and (equal beg (point-min))
+                                (equal end (point-max)))
+                       (push t full-flushes))
+                     (funcall original-flush beg end))))
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (search-forward "line two")
+            (replace-match "line 2" t t)
+            (should-not full-flushes)
+            (should (equal (md-ts--resolve-link-reference "[id]")
+                           "https://live.example"))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-html-nearby-edits-do-not-flush ()
+  "Ordinary edits near HTML block boundaries should not full-flush."
+  (dolist (line '("line before" "first content" "last content" "line after"))
+    (ert-info ((format "editing %s" line))
+      (let ((buf (md-ts-test--fontify
+                  (concat "See [Doc][id].\n\n"
+                          "line before\n"
+                          "<script>\n"
+                          "first content\n"
+                          "middle content\n"
+                          "last content\n"
+                          "</script>\n"
+                          "line after\n\n"
+                          "[id]: https://live.example\n")))
+            (original-flush (symbol-function 'font-lock-flush))
+            full-flushes)
+        (unwind-protect
+            (cl-letf (((symbol-function 'font-lock-flush)
+                       (lambda (&optional beg end)
+                         (when (and (equal beg (point-min))
+                                    (equal end (point-max)))
+                           (push t full-flushes))
+                         (funcall original-flush beg end))))
+              (with-current-buffer buf
+                (goto-char (point-min))
+                (search-forward line)
+                (end-of-line)
+                (insert " changed")
+                (should-not full-flushes)
+                (should (equal (md-ts--resolve-link-reference "[id]")
+                               "https://live.example"))))
+          (kill-buffer buf))))))
+
 (ert-deftest md-ts-test-link-reference-definition-change-refontifies-links ()
   "Definition edits should non-locally update reference link buttons."
   (let ((buf (md-ts-test--fontify "See [Doc][id].\n"))
@@ -1901,6 +2279,56 @@ inline parser ranges cause the first range's faces to be dropped."
        "Doc"))
     (should (equal opened "https://example.com/ref"))))
 
+(ert-deftest md-ts-test-link-open-at-point-no-fontify-foreign-text-button ()
+  "Foreign text buttons should not block no-fontify parser fallback."
+  (let ((buf (generate-new-buffer " *md-ts-test*"))
+        called
+        opened)
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "Visit [here](https://example.com) now.\n")
+          (md-ts-mode)
+          (goto-char (point-min))
+          (search-forward "here")
+          (make-text-button (match-beginning 0) (match-end 0)
+                            'action (lambda (_button)
+                                      (setq called t))
+                            'help-echo "foreign")
+          (goto-char (match-beginning 0))
+          (cl-letf (((symbol-function 'browse-url)
+                     (lambda (url &rest _args)
+                       (setq opened url))))
+            (md-ts-open-link-at-point))
+          (should (equal opened "https://example.com"))
+          (should-not called))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-open-at-point-no-fontify-foreign-overlay ()
+  "Foreign overlay buttons should not block no-fontify parser fallback."
+  (let ((buf (generate-new-buffer " *md-ts-test*"))
+        called
+        opened)
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "Visit [here](https://example.com) now.\n")
+          (md-ts-mode)
+          (goto-char (point-min))
+          (search-forward "here")
+          (let ((overlay (make-button (match-beginning 0) (match-end 0)
+                                      'action (lambda (_button)
+                                                (setq called t))
+                                      'help-echo "foreign")))
+            (goto-char (match-beginning 0))
+            (should (eq (button-at (point)) overlay))
+            (cl-letf (((symbol-function 'browse-url)
+                       (lambda (url &rest _args)
+                         (setq opened url))))
+              (md-ts-open-link-at-point))
+            (should (equal opened "https://example.com"))
+            (should-not called)
+            (should (eq (button-at (point)) overlay))))
+      (kill-buffer buf))))
+
 (ert-deftest md-ts-test-link-open-at-point-reference-definition ()
   "`md-ts-open-link-at-point' should open reference definition labels."
   (let (opened)
@@ -1940,6 +2368,250 @@ inline parser ranges cause the first range's faces to be dropped."
   (should-error
    (md-ts-test--open-link-at-search "No links here.\n" "links")
    :type 'user-error))
+
+(ert-deftest md-ts-test-link-target-at-point-rejects-adjacent-prose ()
+  "Adjacent prose should not inherit neighboring parsed link targets."
+  (let ((buf (md-ts-test--fontify
+              (concat "before[one](https://one.example) "
+                      "middle [two](https://two.example)after\n"))))
+    (unwind-protect
+        (with-current-buffer buf
+          (dolist (case '(("prose before a link" "before" end)
+                          ("prose between two links" "middle" beginning)
+                          ("prose after a link" "after" beginning)))
+            (pcase-let ((`(,label ,search ,edge) case))
+              (ert-info ((format "checking %s" label))
+                (goto-char (point-min))
+                (search-forward search)
+                (goto-char (if (eq edge 'end)
+                               (1- (match-end 0))
+                             (match-beginning 0)))
+                (should-not (md-ts--link-target-at-point))
+                (cl-letf (((symbol-function 'browse-url)
+                           (lambda (&rest _args)
+                             (ert-fail "browse-url called for prose")))
+                          ((symbol-function 'find-file)
+                           (lambda (&rest _args)
+                             (ert-fail "find-file called for prose")))
+                          ((symbol-function 'url-mailto)
+                           (lambda (&rest _args)
+                             (ert-fail "url-mailto called for prose"))))
+                  (should-error (md-ts-open-link-at-point)
+                                :type 'user-error))))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-open-at-point-rejects-foreign-button ()
+  "`md-ts-open-link-at-point' should not activate non-Markdown buttons."
+  (let ((buf (md-ts-test--fontify "Plain button text.\n"))
+        called)
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "button")
+          (make-text-button (match-beginning 0) (match-end 0)
+                            'action (lambda (_button)
+                                      (setq called t)))
+          (goto-char (match-beginning 0))
+          (should (button-at (point)))
+          (should-error (md-ts-open-link-at-point) :type 'user-error)
+          (should-not called))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-open-at-point-rejects-foreign-button-before-link ()
+  "A foreign button on prose before a link should not borrow its target."
+  (let ((buf (md-ts-test--fontify "before[one](https://one.example)\n"))
+        called)
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "before")
+          (make-text-button (match-beginning 0) (match-end 0)
+                            'action (lambda (_button)
+                                      (setq called t))
+                            'help-echo "foreign")
+          (goto-char (1- (match-end 0)))
+          (should (button-at (point)))
+          (cl-letf (((symbol-function 'browse-url)
+                     (lambda (&rest _args)
+                       (ert-fail "browse-url called for prose button")))
+                    ((symbol-function 'find-file)
+                     (lambda (&rest _args)
+                       (ert-fail "find-file called for prose button")))
+                    ((symbol-function 'url-mailto)
+                     (lambda (&rest _args)
+                       (ert-fail "url-mailto called for prose button"))))
+            (should-error (md-ts-open-link-at-point) :type 'user-error))
+          (should-not called))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-foreign-button-survives-refontification ()
+  "Refontifying `md-ts-mode' should not remove unrelated text buttons."
+  (let ((buf (md-ts-test--fontify "Plain button text.\n"))
+        called)
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "button")
+          (make-text-button (match-beginning 0) (match-end 0)
+                            'action (lambda (_button)
+                                      (setq called t))
+                            'help-echo "foreign")
+          (font-lock-flush (point-min) (point-max))
+          (font-lock-ensure)
+          (goto-char (point-min))
+          (search-forward "button")
+          (let ((button (button-at (match-beginning 0))))
+            (should button)
+            (should (equal (button-get button 'help-echo) "foreign"))
+            (push-button (match-beginning 0))
+            (should called)))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-foreign-button-on-link-text-survives-refontification ()
+  "Foreign buttons on link text should not be mistaken for md-ts buttons."
+  (let ((buf (md-ts-test--fontify "[link](https://example.com)\n"))
+        called
+        opened)
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "link")
+          (let ((pos (match-beginning 0))
+                (end (match-end 0)))
+            (should (md-ts--link-button-p (button-at pos)))
+            (make-text-button pos end
+                              'action (lambda (_button)
+                                        (setq called t))
+                              'help-echo "foreign")
+            (should (get-text-property pos 'md-ts-link-button))
+            (should-not (md-ts--link-button-p (button-at pos)))
+            (goto-char pos)
+            (cl-letf (((symbol-function 'browse-url)
+                       (lambda (url &rest _args)
+                         (setq opened url)))
+                      ((symbol-function 'find-file)
+                       (lambda (&rest _args)
+                         (ert-fail "find-file called for URI link")))
+                      ((symbol-function 'url-mailto)
+                       (lambda (&rest _args)
+                         (ert-fail "url-mailto called for URI link"))))
+              (md-ts-open-link-at-point))
+            (should (equal opened "https://example.com"))
+            (should-not called)
+            (font-lock-flush (point-min) (point-max))
+            (font-lock-ensure)
+            (let ((button (button-at pos)))
+              (should button)
+              (should-not (button-get button 'md-ts-link-button))
+              (should (equal (button-get button 'help-echo) "foreign"))
+              (push-button pos)
+              (should called))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-wider-foreign-button-drops-stale-help ()
+  "A wider foreign text button should not keep stale md-ts help."
+  (let ((buf (md-ts-test--fontify "pre [link](https://example.com) post\n"))
+        called)
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "link")
+          (let ((pos (match-beginning 0))
+                (wide-beg (point-min))
+                (wide-end (line-end-position)))
+            (should (md-ts--link-button-p (button-at pos)))
+            (should (equal (get-text-property pos 'help-echo)
+                           "https://example.com"))
+            (make-text-button wide-beg wide-end
+                              'action (lambda (_button)
+                                        (setq called t)))
+            (should (button-at pos))
+            (should (get-text-property pos 'md-ts-link-button))
+            (font-lock-flush (point-min) (point-max))
+            (font-lock-ensure)
+            (let ((button (button-at pos)))
+              (should button)
+              (should-not (md-ts--link-button-p button))
+              (should-not (get-text-property pos 'md-ts-link-button))
+              (should-not (get-text-property pos 'md-ts-link-help-echo))
+              (should-not (plist-get (text-properties-at pos) 'help-echo))
+              (push-button pos)
+              (should called))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-partial-foreign-button-overlap-cleans-tails ()
+  "Partial foreign text-button overlaps should not leave stale md-ts tails."
+  (dolist (case '((start 0 2 (2 3))
+                  (middle 1 3 (0 3))
+                  (end 2 4 (0 1))))
+    (pcase-let ((`(,label ,foreign-start ,foreign-end ,plain-positions)
+                 case))
+      (ert-info ((format "partial %s overlap" label))
+        (let ((buf (md-ts-test--fontify "[link](https://example.com)\n"))
+              called)
+          (unwind-protect
+              (with-current-buffer buf
+                (goto-char (point-min))
+                (search-forward "link")
+                (let* ((link-beg (match-beginning 0))
+                       (link-end (match-end 0))
+                       (foreign-beg (+ link-beg foreign-start))
+                       (foreign-limit (+ link-beg foreign-end)))
+                  (should (md-ts--link-button-p (button-at link-beg)))
+                  (make-text-button foreign-beg foreign-limit
+                                    'action (lambda (_button)
+                                              (setq called t))
+                                    'help-echo "foreign")
+                  (font-lock-flush (point-min) (point-max))
+                  (font-lock-ensure)
+                  (dolist (rel plain-positions)
+                    (let ((pos (+ link-beg rel)))
+                      (dolist (prop '(button category action help-echo
+                                             md-ts-link-button
+                                             md-ts-link-help-echo))
+                        (should-not (get-text-property pos prop)))))
+                  (dolist (pos (number-sequence foreign-beg
+                                                (1- foreign-limit)))
+                    (let ((button (button-at pos)))
+                      (should button)
+                      (should-not (md-ts--link-button-p button))
+                      (should-not (get-text-property pos 'md-ts-link-button))
+                      (should-not (get-text-property pos
+                                                     'md-ts-link-help-echo))
+                      (should (equal (button-get button 'help-echo)
+                                     "foreign"))))
+                  (push-button foreign-beg)
+                  (should called)
+                  (should (= link-end (+ link-beg 4)))))
+            (kill-buffer buf)))))))
+
+(ert-deftest md-ts-test-link-foreign-overlay-removes-hidden-md-ts-props ()
+  "A foreign overlay should not leave hidden md-ts text button props."
+  (let ((buf (md-ts-test--fontify "[link](https://example.com)\n"))
+        called)
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "link")
+          (let* ((pos (match-beginning 0))
+                 (end (match-end 0))
+                 (overlay (make-button pos end
+                                       'action (lambda (_button)
+                                                 (setq called t))
+                                       'help-echo "overlay")))
+            (should (md-ts--link-button-p (copy-marker pos t)))
+            (should (eq (button-at pos) overlay))
+            (font-lock-flush (point-min) (point-max))
+            (font-lock-ensure)
+            (should (eq (button-at pos) overlay))
+            (should (equal (button-get overlay 'help-echo) "overlay"))
+            (dolist (prop '(button category action help-echo
+                                   md-ts-link-button
+                                   md-ts-link-help-echo))
+              (should-not (get-text-property pos prop)))
+            (push-button pos)
+            (should called)))
+      (kill-buffer buf))))
 
 (ert-deftest md-ts-test-link-open-at-point-key-binding ()
   "`md-ts-mode-map' should bind the common open-link key."
