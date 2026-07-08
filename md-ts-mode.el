@@ -2051,6 +2051,34 @@ left intact."
     "code_fence_content" "info_string" "html_block" "html_tag")
   "Tree-sitter node types where bare link scanning should not apply.")
 
+(defconst md-ts--bare-link-unsafe-context-no-cache
+  'md-ts--bare-link-unsafe-context-no-cache
+  "Sentinel for uncached bare-link unsafe-context checks.")
+
+(defvar md-ts--bare-link-unsafe-context-ranges
+  md-ts--bare-link-unsafe-context-no-cache
+  "Dynamically bound unsafe ranges for bare-link scans.")
+
+(defconst md-ts--bare-link-unsafe-range-queries
+  '((markdown . ((link_reference_definition) @unsafe
+                 (fenced_code_block) @unsafe
+                 (indented_code_block) @unsafe
+                 (code_fence_content) @unsafe
+                 (info_string) @unsafe
+                 (html_block) @unsafe
+                 (link_destination) @unsafe))
+    (markdown-inline . ((inline_link) @unsafe
+                        (full_reference_link) @unsafe
+                        (collapsed_reference_link) @unsafe
+                        (shortcut_link) @unsafe
+                        (image) @unsafe
+                        (uri_autolink) @unsafe
+                        (email_autolink) @unsafe
+                        (link_destination) @unsafe
+                        (code_span) @unsafe
+                        (html_tag) @unsafe)))
+  "Tree-sitter queries for ranges unsafe for bare-link scanning.")
+
 (defconst md-ts--bare-link-reference-definition-no-cache
   'md-ts--bare-link-reference-definition-no-cache
   "Sentinel for uncached bare-link reference-definition checks.")
@@ -2079,6 +2107,49 @@ left intact."
                                    '((link_reference_definition) @definition)
                                    beg end))))
 
+(defun md-ts--bare-link-sort-merge-ranges (ranges)
+  "Return RANGES sorted and merged as a vector of cons cells."
+  (let (merged)
+    (dolist (range (sort ranges (lambda (a b) (< (car a) (car b)))))
+      (let ((beg (car range))
+            (end (cdr range)))
+        (when (< beg end)
+          (if (and merged (<= beg (cdar merged)))
+              (setcdr (car merged) (max (cdar merged) end))
+            (push (cons beg end) merged)))))
+    (vconcat (nreverse merged))))
+
+(defun md-ts--bare-link-unsafe-ranges (beg end)
+  "Return sorted unsafe ranges for bare-link scans between BEG and END."
+  (save-restriction
+    (widen)
+    (let (ranges)
+      (dolist (spec md-ts--bare-link-unsafe-range-queries)
+        (pcase-let ((`(,language . ,query) spec))
+          (dolist (root (md-ts--font-lock-root-nodes beg end language))
+            (dolist (capture (ignore-errors
+                                (treesit-query-capture root query beg end)))
+              (let* ((node (cdr capture))
+                     (node-beg (treesit-node-start node))
+                     (node-end (treesit-node-end node)))
+                (when (and (< node-beg end) (< beg node-end))
+                  (push (cons node-beg node-end) ranges)))))))
+      (md-ts--bare-link-sort-merge-ranges ranges))))
+
+(defun md-ts--range-intersects-sorted-ranges-p (beg end ranges)
+  "Return non-nil when BEG..END intersects sorted RANGES."
+  (let ((lo 0)
+        (hi (length ranges)))
+    (while (< lo hi)
+      (let* ((mid (+ lo (/ (- hi lo) 2)))
+             (range (aref ranges mid)))
+        (if (< (car range) end)
+            (setq lo (1+ mid))
+          (setq hi mid))))
+    (let ((index (1- lo)))
+      (and (>= index 0)
+           (< beg (cdr (aref ranges index)))))))
+
 (defun md-ts--range-in-reference-definition-ranges-p (beg end ranges)
   "Return non-nil when BEG to END is inside one of RANGES."
   (seq-some (lambda (range)
@@ -2099,18 +2170,23 @@ left intact."
 
 (defun md-ts--bare-link-unsafe-context-p (beg end)
   "Return non-nil when BEG to END is not prose for bare links."
-  (let ((last-pos (max beg (1- end))))
-    (or (seq-some
-         (lambda (node)
-           (md-ts--node-has-ancestor-type-p
-            node md-ts--bare-link-unsafe-node-types))
-         (list (md-ts--node-at-containing-position beg 'markdown-inline)
-               (md-ts--node-at-containing-position last-pos 'markdown-inline)
-               (md-ts--node-at-containing-position beg 'markdown)
-               (md-ts--node-at-containing-position last-pos 'markdown)))
-        ;; Fall back to the more expensive definition query only when cheap
-        ;; point-context checks did not classify the match.
-        (md-ts--range-in-link-reference-definition-p beg end))))
+  (if (eq md-ts--bare-link-unsafe-context-ranges
+          md-ts--bare-link-unsafe-context-no-cache)
+      (let ((last-pos (max beg (1- end))))
+        (or (seq-some
+             (lambda (node)
+               (md-ts--node-has-ancestor-type-p
+                node md-ts--bare-link-unsafe-node-types))
+             (list (md-ts--node-at-containing-position beg 'markdown-inline)
+                   (md-ts--node-at-containing-position last-pos
+                                                       'markdown-inline)
+                   (md-ts--node-at-containing-position beg 'markdown)
+                   (md-ts--node-at-containing-position last-pos 'markdown)))
+            ;; Fall back to the more expensive definition query only when cheap
+            ;; point-context checks did not classify the match.
+            (md-ts--range-in-link-reference-definition-p beg end)))
+    (md-ts--range-intersects-sorted-ranges-p
+     beg end md-ts--bare-link-unsafe-context-ranges)))
 
 (defun md-ts--button-overlaps-region-p (beg end)
   "Return non-nil when any text or overlay button overlaps BEG to END."
@@ -2271,7 +2347,7 @@ nil."
 (defun md-ts--bare-link-generic-url-ranges
     (scan-beg scan-end &optional check-overlap)
   "Return valid generic bare URL ranges between SCAN-BEG and SCAN-END.
-Each returned vector element has the form [BEG END PREFIX-MAX-END].
+Each returned vector element has the form [BEG END PREFIX-MAX-END TEXT].
 CHECK-OVERLAP has the same meaning as in
 `md-ts--bare-link-candidate-valid-p'.  The prefix maximum lets
 mailto containment checks avoid rescanning `goto-address-url-regexp'
@@ -2288,7 +2364,7 @@ for every explicit mailto candidate."
             (when (md-ts--bare-link-candidate-valid-p
                    url-beg url-end text check-overlap)
               (setq prefix-max-end (max prefix-max-end url-end))
-              (push (vector url-beg url-end prefix-max-end) ranges))))))
+              (push (vector url-beg url-end prefix-max-end text) ranges))))))
     (vconcat (nreverse ranges))))
 
 (defun md-ts--bare-link-generic-url-range-cache
@@ -2322,6 +2398,17 @@ mailto URI can own URL-like text inside its query."
           (setq hi mid))))
     (and prior-index
          (<= end (aref (aref url-ranges prior-index) 2)))))
+
+(defun md-ts--fontify-bare-url-ranges (url-ranges apply-beg apply-end)
+  "Fontify cached URL-RANGES intersecting APPLY-BEG to APPLY-END."
+  (dotimes (index (length url-ranges))
+    (let* ((range (aref url-ranges index))
+           (beg (aref range 0))
+           (end (aref range 1))
+           (target (aref range 3)))
+      (when (and (md-ts--regions-intersect-p beg end apply-beg apply-end)
+                 (not (md-ts--button-overlaps-region-p beg end)))
+        (md-ts--fontify-bare-link beg end target)))))
 
 (defun md-ts--bare-mailto-uri-embedded-in-scheme-token-p (beg)
   "Return non-nil when a mailto match at BEG is inside a scheme-like token."
@@ -2379,9 +2466,8 @@ URL-RANGES are cached generic URL ranges used to detect outer bare URLs."
           (save-excursion
             (save-match-data
               (let* ((case-fold-search t)
-                     (md-ts--bare-link-reference-definition-ranges
-                      (md-ts--link-reference-definition-ranges
-                       scan-beg scan-end))
+                     (md-ts--bare-link-unsafe-context-ranges
+                      (md-ts--bare-link-unsafe-ranges scan-beg scan-end))
                      (generic-url-ranges-cache
                       (md-ts--bare-link-generic-url-range-cache
                        scan-beg scan-end t)))
@@ -2396,9 +2482,8 @@ URL-RANGES are cached generic URL ranges used to detect outer bare URLs."
                    (md-ts--bare-mailto-uri-skip-p
                     match-beg match-end (funcall generic-url-ranges-cache)))
                  #'md-ts--bare-mailto-uri-normalized-match)
-                (md-ts--fontify-bare-links-with-regexp
-                 goto-address-url-regexp
-                 scan-beg scan-end scan-beg scan-end #'identity)
+                (md-ts--fontify-bare-url-ranges
+                 (funcall generic-url-ranges-cache) scan-beg scan-end)
                 (md-ts--fontify-bare-links-with-regexp
                  goto-address-mail-regexp
                  scan-beg scan-end scan-beg scan-end
@@ -2729,9 +2814,8 @@ has the same meaning as in `md-ts--bare-link-candidate-valid-p'."
         (widen)
         (save-match-data
           (let* ((case-fold-search t)
-                 (md-ts--bare-link-reference-definition-ranges
-                  (md-ts--link-reference-definition-ranges
-                   line-beg line-end))
+                 (md-ts--bare-link-unsafe-context-ranges
+                  (md-ts--bare-link-unsafe-ranges line-beg line-end))
                  (generic-url-ranges-cache
                   (md-ts--bare-link-generic-url-range-cache
                    line-beg line-end check-overlap)))

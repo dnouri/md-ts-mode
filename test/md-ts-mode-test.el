@@ -2976,6 +2976,55 @@ inline parser ranges cause the first range's faces to be dropped."
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
 
+(ert-deftest md-ts-test-link-bare-fontification-caches-unsafe-contexts ()
+  "Bare link scans should not do point-node unsafe checks per candidate."
+  (let* ((count 48)
+         (text (concat
+                (mapconcat
+                 (lambda (n)
+                   (format "Visit https://example%d.test/path and user%d@example.test."
+                           n n))
+                 (number-sequence 1 count)
+                 "\n")
+                "\nCode `https://unsafe.example/span` here.\n"
+                "See [label](https://unsafe.example/parsed).\n"))
+         (node-at-calls 0)
+         (node-at-original
+          (symbol-function 'md-ts--node-at-containing-position))
+         buf)
+    (unwind-protect
+        (progn
+          (setq buf (generate-new-buffer " *md-ts-test*"))
+          (with-current-buffer buf
+            (insert text)
+            (md-ts-mode)
+            (font-lock-ensure)
+            (funcall font-lock-unfontify-region-function
+                     (point-min) (point-max))
+            (cl-letf (((symbol-function 'md-ts--node-at-containing-position)
+                       (lambda (&rest args)
+                         (setq node-at-calls (1+ node-at-calls))
+                         (apply node-at-original args))))
+              (md-ts--fontify-bare-links (point-min) (point-max)))
+            (should (= node-at-calls 0))
+            (dotimes (n count)
+              (goto-char (point-min))
+              (search-forward (format "https://example%d.test/path" (1+ n)))
+              (should (button-at (match-beginning 0)))
+              (search-forward (format "user%d@example.test" (1+ n)))
+              (should (button-at (match-beginning 0))))
+            (goto-char (point-min))
+            (search-forward "https://unsafe.example/span")
+            (should-not (button-at (match-beginning 0)))
+            (should-not (get-text-property (match-beginning 0)
+                                           'md-ts-link-static-target))
+            (search-forward "https://unsafe.example/parsed")
+            (should-not (button-at (match-beginning 0)))
+            (should-not (get-text-property (match-beginning 0)
+                                           'md-ts-link-static-target))))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
 (ert-deftest md-ts-test-link-bare-url-trims-trailing-prose-punctuation ()
   "Bare URL buttons should not include prose punctuation or delimiters."
   (let ((buf (md-ts-test--fontify
@@ -4018,21 +4067,19 @@ inline parser ranges cause the first range's faces to be dropped."
             (should (= count 12))))
       (kill-buffer buf))))
 
-(ert-deftest md-ts-test-link-bare-caches-reference-definition-ranges ()
-  "Bare scanner should query reference definitions once per pass."
+(ert-deftest md-ts-test-link-bare-caches-unsafe-ranges ()
+  "Bare scanner should precompute unsafe ranges once per pass."
   (let* ((chunks (cl-loop for i below 20
                           collect (format "https://example.com/%d" i)))
          (text (concat (mapconcat #'identity chunks " ") "\n"))
          (buf (generate-new-buffer " *md-ts-test*"))
          (calls 0)
-         (original (symbol-function
-                    'md-ts--link-reference-definition-ranges)))
+         (original (symbol-function 'md-ts--bare-link-unsafe-ranges)))
     (unwind-protect
         (with-current-buffer buf
           (insert text)
           (md-ts-mode)
-          (cl-letf (((symbol-function
-                      'md-ts--link-reference-definition-ranges)
+          (cl-letf (((symbol-function 'md-ts--bare-link-unsafe-ranges)
                      (lambda (&rest args)
                        (setq calls (1+ calls))
                        (apply original args))))
