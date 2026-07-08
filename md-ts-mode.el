@@ -887,17 +887,50 @@ Replaces `[ ]' with ☐ and `[x]' with ☑ via `display' property."
   (and (string-match-p md-ts--uri-scheme-regexp destination)
        (not (md-ts--windows-drive-path-p destination))))
 
+(defconst md-ts--markdown-escaped-property 'md-ts-markdown-escaped
+  "Text property marking characters decoded from Markdown escapes.")
+
+(defun md-ts--local-link-fragment-start (destination)
+  "Return the unescaped # fragment separator index in DESTINATION.
+Ignore literal # characters that were decoded from Markdown
+backslash escapes by `md-ts--markdown-unescape'."
+  (let ((pos 0)
+        fragment-start)
+    (while (and (not fragment-start)
+                (setq pos (string-match-p "#" destination pos)))
+      (if (get-text-property pos md-ts--markdown-escaped-property
+                             destination)
+          (setq pos (1+ pos))
+        (setq fragment-start pos)))
+    fragment-start))
+
 (defun md-ts--local-link-file (destination)
   "Return the file part of local link DESTINATION.
 For local paths with a trailing #fragment, remove the fragment.
 Heading navigation for the fragment is intentionally deferred."
-  (if-let* ((fragment-start (string-match-p "#" destination)))
+  (if-let* ((fragment-start (md-ts--local-link-fragment-start destination)))
       (substring destination 0 fragment-start)
     destination))
 
 (defun md-ts--markdown-unescape (text)
-  "Return TEXT with basic Markdown backslash escapes decoded."
-  (replace-regexp-in-string "\\\\\\([[:punct:]]\\)" "\\1" text t))
+  "Return TEXT with basic Markdown backslash escapes decoded.
+Decoded punctuation characters carry `md-ts-markdown-escaped' so
+later link handling can distinguish literal punctuation from
+Markdown syntax."
+  (let ((start 0)
+        (pieces nil)
+        changed)
+    (while (string-match "\\\\\\([[:punct:]]\\)" text start)
+      (setq changed t)
+      (push (substring text start (match-beginning 0)) pieces)
+      (let ((escaped (substring text (match-beginning 1) (match-end 1))))
+        (put-text-property 0 (length escaped)
+                           md-ts--markdown-escaped-property t escaped)
+        (push escaped pieces))
+      (setq start (match-end 0)))
+    (if changed
+        (apply #'concat (nreverse (cons (substring text start) pieces)))
+      text)))
 
 (defun md-ts--link-destination-url (destination)
   "Return the URL represented by raw link DESTINATION text.
@@ -1005,7 +1038,7 @@ not supported yet."
     (cond
      ((string-empty-p url)
       (user-error "Empty link destinations are not supported"))
-     ((string-prefix-p "#" url)
+     ((eq (md-ts--local-link-fragment-start url) 0)
       (user-error "Same-buffer fragment links are not supported yet"))
      ((string-match-p "\\`mailto:" url)
       (url-mailto (url-generic-parse-url url)))

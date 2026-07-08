@@ -984,6 +984,21 @@ inline parser ranges cause the first range's faces to be dropped."
       (md-ts-test--push-button-at-search text "notes"))
     (should (equal opened "docs/file.md"))))
 
+(ert-deftest md-ts-test-link-inline-escaped-hash-local-path-opens-literal-file ()
+  "Escaped hashes in local paths are literal filename characters."
+  (let ((text "Open [notes](docs/a\\#b.md) please.\n")
+        opened)
+    (should (equal (md-ts-test--help-echo-at-search text "notes")
+                   "docs/a#b.md"))
+    (cl-letf (((symbol-function 'find-file)
+               (lambda (file &rest _args)
+                 (setq opened file)))
+              ((symbol-function 'browse-url)
+               (lambda (&rest _args)
+                 (ert-fail "browse-url called for escaped local hash"))))
+      (md-ts-test--push-button-at-search text "notes"))
+    (should (equal opened "docs/a#b.md"))))
+
 (ert-deftest md-ts-test-link-inline-windows-drive-paths-use-find-file ()
   "Windows drive paths should be opened as files, not URI schemes."
   (let (opened)
@@ -1341,6 +1356,22 @@ inline parser ranges cause the first range's faces to be dropped."
        "See [Python docs][py] now.\n\n[py]: https://python.org\n"
        "Python docs"))
     (should (equal opened "https://python.org"))))
+
+(ert-deftest md-ts-test-link-reference-escaped-hash-local-path-opens-literal-file ()
+  "Escaped hashes in reference destinations are literal filename characters."
+  (let ((text (concat "See [Doc][hash].\n\n"
+                      "[hash]: docs/a\\#b.md\n"))
+        opened)
+    (should (equal (md-ts-test--help-echo-at-search text "Doc")
+                   "docs/a#b.md"))
+    (cl-letf (((symbol-function 'find-file)
+               (lambda (file &rest _args)
+                 (setq opened file)))
+              ((symbol-function 'browse-url)
+               (lambda (&rest _args)
+                 (ert-fail "browse-url called for escaped local hash"))))
+      (md-ts-test--push-button-at-search text "Doc"))
+    (should (equal opened "docs/a#b.md"))))
 
 (ert-deftest md-ts-test-link-reference-label-normalization ()
   "Reference labels should be whitespace-folded and simply downcased."
