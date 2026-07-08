@@ -1034,9 +1034,9 @@ definition."
 URL may come from parsed links, images, references, autolinks, or
 bare prose links.  Use `url-mailto' for `mailto:' URIs,
 `browse-url' for other URI schemes, and `find-file' for local or
-relative paths.  All fragment navigation is deferred: local paths
-with an unescaped `#fragment' open only the file part, and
-fragment-only destinations signal a `user-error'.  Escaped `#'
+relative paths.  Local/same-buffer fragment navigation is
+deferred: local paths with an unescaped `#fragment' open only the
+file part, and fragment-only destinations signal a `user-error'.  Escaped `#'
 characters are literal filename characters.  Empty destinations are
 not supported yet."
   (let* ((case-fold-search t)
