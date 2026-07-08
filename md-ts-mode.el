@@ -2169,12 +2169,18 @@ punctuation set to trim."
 Other terminal punctuation such as `!', `?', `:', and `;' is valid
 query data after the first question mark.")
 
+(defun md-ts--bare-mailto-uri-query-content-p (text)
+  "Return non-nil when mailto URI TEXT has actual query content."
+  (save-match-data
+    (and (string-match "\\?" text)
+         (string-match-p "[[:alnum:]_=&%]" (substring text (match-end 0))))))
+
 (defun md-ts--bare-mailto-uri-normalized-match (beg end)
   "Return normalized (BEG END TEXT) for an explicit bare mailto URI."
   (let ((text (buffer-substring-no-properties beg end)))
     (md-ts--bare-link-normalized-match
      beg end
-     (and (string-match-p "\\?" text)
+     (and (md-ts--bare-mailto-uri-query-content-p text)
           md-ts--bare-mailto-uri-query-terminal-punctuation))))
 
 (defun md-ts--regions-intersect-p (beg end other-beg other-end)
@@ -2309,6 +2315,26 @@ URL-RANGES are cached generic URL ranges used to detect outer bare URLs."
   (or (md-ts--bare-mailto-uri-embedded-in-scheme-token-p beg)
       (md-ts--bare-link-covered-by-earlier-url-p beg end url-ranges)))
 
+(defun md-ts--bare-email-in-scheme-mailto-uri-p (beg end)
+  "Return non-nil when email BEG..END is inside a scheme-prefixed mailto URI."
+  (save-excursion
+    (let ((case-fold-search t)
+          mailto-beg found)
+      (goto-char beg)
+      (while (search-backward "mailto:" (line-beginning-position) t)
+        (unless found
+          (setq mailto-beg (point))
+          (when (and (eq (char-before mailto-beg) ?:)
+                     (md-ts--bare-mailto-uri-embedded-in-scheme-token-p
+                      mailto-beg)
+                     (looking-at md-ts--bare-mailto-uri-regexp)
+                     (pcase-let ((`(,_match-beg ,match-end ,_text)
+                                  (md-ts--bare-mailto-uri-normalized-match
+                                   (match-beginning 0) (match-end 0))))
+                       (<= end match-end)))
+            (setq found t))))
+      found)))
+
 (defun md-ts--fontify-bare-links (beg end)
   "Fontify bare URLs and email addresses on lines covering BEG to END."
   (pcase-let ((`(,scan-beg . ,scan-end) (md-ts--line-bounds beg end)))
@@ -2343,7 +2369,10 @@ URL-RANGES are cached generic URL ranges used to detect outer bare URLs."
                 (md-ts--fontify-bare-links-with-regexp
                  goto-address-mail-regexp
                  scan-beg scan-end scan-beg scan-end
-                 (lambda (address) (concat "mailto:" address)))))))))))
+                 (lambda (address) (concat "mailto:" address))
+                 (lambda (match-beg match-end _text)
+                   (md-ts--bare-email-in-scheme-mailto-uri-p
+                    match-beg match-end)))))))))))
 
 (defvar-local md-ts--font-lock-stale-side-effect-bounds nil
   "Old side-effect node bounds recorded before destructive edits.
@@ -2688,7 +2717,10 @@ has the same meaning as in `md-ts--bare-link-candidate-valid-p'."
                 (md-ts--bare-link-target-at-point-with-regexp
                  pos goto-address-mail-regexp line-beg line-end
                  (lambda (address) (concat "mailto:" address))
-                 nil nil check-overlap))))))))
+                 (lambda (match-beg match-end _text)
+                   (md-ts--bare-email-in-scheme-mailto-uri-p
+                    match-beg match-end))
+                 nil check-overlap))))))))
 
 (defun md-ts--open-link-button (button)
   "Open Markdown link BUTTON.
