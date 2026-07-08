@@ -44,6 +44,7 @@
 (require 'browse-url)
 (require 'url-mailto)
 (require 'url-parse)
+(require 'goto-addr)
 (require 'seq)
 (require 'subr-x)
 (require 'outline)
@@ -846,7 +847,7 @@ via the `display' text property."
          (rule (make-string (max 3 (- (window-width) 1)) ?─)))
     (treesit-fontify-with-override beg node-end 'md-ts-delimiter
                                    override start end)
-    (put-text-property beg node-end 'display rule)))
+    (md-ts--put-display-property beg node-end rule)))
 
 (defun md-ts--fontify-task-marker (node override start end &rest _)
   "Fontify task list marker NODE with face and checkbox display.
@@ -858,7 +859,7 @@ Replaces `[ ]' with ☐ and `[x]' with ☑ via `display' property."
          (glyph (if checked "☑" "☐")))
     (treesit-fontify-with-override beg node-end 'md-ts-task-list-marker
                                    override start end)
-    (put-text-property beg node-end 'display glyph)))
+    (md-ts--put-display-property beg node-end glyph)))
 
 (defun md-ts--child-by-type (node type)
   "Return the first named child of NODE whose type is TYPE."
@@ -1015,19 +1016,29 @@ not supported yet."
      (t
       (find-file (md-ts--local-link-file url))))))
 
-(defun md-ts--make-link-button (beg end url &optional _dynamic)
+(defun md-ts--make-link-button (beg end url &optional _dynamic static-target)
   "Make the text from BEG to END open URL as a standard button.
-URL is used for help text; activation resolves the parsed Markdown
-link target again so reference buttons stay fresh when definitions
-elsewhere in the buffer change."
+URL is used for help text.  By default activation resolves the
+parsed Markdown link target again so reference buttons stay fresh
+when definitions elsewhere in the buffer change.  When
+STATIC-TARGET is non-nil, activation first revalidates the current
+bare-link text at the button position."
   (when (and (< beg end) (not (string-empty-p url)))
     (if (md-ts--foreign-button-in-region-p beg end)
         (md-ts--remove-link-button-properties beg end)
-      (make-text-button beg end
-                        'md-ts-link-button t
-                        'md-ts-link-help-echo url
-                        'action #'md-ts--open-link-button
-                        'help-echo url))))
+      (unless static-target
+        (with-silent-modifications
+          (let ((inhibit-read-only t))
+            (remove-text-properties
+             beg end '(md-ts-link-static-target nil)))))
+      (apply #'make-text-button
+             beg end
+             `(md-ts-link-button t
+               md-ts-link-help-echo ,url
+               action ,#'md-ts--open-link-button
+               help-echo ,url
+               ,@(when static-target
+                   `(md-ts-link-static-target ,static-target)))))))
 
 (defconst md-ts--link-node-types
   '("inline_link" "image" "full_reference_link"
@@ -1680,16 +1691,18 @@ all font-lock state."
 (defconst md-ts--link-button-properties
   '(button nil category nil action nil help-echo nil keymap nil
     mouse-face nil follow-link nil md-ts-link-button nil
-    md-ts-link-help-echo nil)
+    md-ts-link-help-echo nil md-ts-link-static-target nil
+    md-ts-bare-link-face nil)
   "Text properties owned by md-ts link buttons.")
 
 (defconst md-ts--link-button-residual-properties
-  '(md-ts-link-button nil md-ts-link-help-echo nil)
+  '(md-ts-link-button nil md-ts-link-help-echo nil
+    md-ts-link-static-target nil md-ts-bare-link-face nil)
   "Md-ts-specific link props that can remain under foreign buttons.")
 
 (defconst md-ts--link-button-segment-properties
   '(button action category help-echo md-ts-link-button
-    md-ts-link-help-echo)
+    md-ts-link-help-echo md-ts-link-static-target md-ts-bare-link-face)
   "Text properties that delimit md-ts link-button cleanup segments.")
 
 (defun md-ts--legacy-link-button-p (button)
@@ -1762,7 +1775,9 @@ all font-lock state."
 (defun md-ts--link-residual-property-at-p (pos)
   "Return non-nil if POS has md-ts link residual text props."
   (or (get-text-property pos 'md-ts-link-button)
-      (get-text-property pos 'md-ts-link-help-echo)))
+      (get-text-property pos 'md-ts-link-help-echo)
+      (get-text-property pos 'md-ts-link-static-target)
+      (get-text-property pos 'md-ts-bare-link-face)))
 
 (defun md-ts--stale-link-help-echo-p (pos)
   "Return non-nil if POS has an md-ts-owned `help-echo' value."
@@ -1805,6 +1820,7 @@ properties are not removed."
                (md-ts--link-button-property-segment pos)))
     (when (md-ts--stale-link-help-echo-p pos)
       (remove-text-properties span-beg span-end '(help-echo nil)))
+    (md-ts--remove-link-face-from-region span-beg span-end)
     (remove-text-properties span-beg span-end
                             md-ts--link-button-residual-properties)
     span-end))
@@ -1825,6 +1841,7 @@ buttons are cleared without taking ownership."
            ((md-ts--owned-text-link-button-p pos)
             (pcase-let ((`(,span-beg . ,span-end)
                          (md-ts--property-span pos 'button)))
+              (md-ts--remove-link-face-from-region span-beg span-end)
               (remove-text-properties
                span-beg span-end md-ts--link-button-properties)
               (setq pos (min limit (max (1+ pos) span-end)))))
@@ -1837,10 +1854,625 @@ buttons are cleared without taking ownership."
             (setq pos (md-ts--next-link-button-property-change
                        pos limit)))))))))
 
+(defun md-ts--link-face-value-p (face)
+  "Return non-nil when FACE includes `link'."
+  (if (listp face) (memq 'link face)
+    (eq face 'link)))
+
+(defun md-ts--remove-link-face-value (face)
+  "Return FACE with md-ts-owned bare `link' face removed."
+  (cond
+   ((eq face 'link) nil)
+   ((and (listp face) (memq 'link face))
+    (let ((faces (delq 'link (copy-sequence face))))
+      (cond
+       ((null faces) nil)
+       ((null (cdr faces)) (car faces))
+       (t faces))))
+   (t face)))
+
+(defun md-ts--next-link-face-property-change (pos limit)
+  "Return next `face' or md-ts bare face ownership change after POS before LIMIT."
+  (min (or (next-single-property-change pos 'face nil limit) limit)
+       (or (next-single-property-change pos 'md-ts-bare-link-face nil limit)
+           limit)))
+
+(defun md-ts--add-link-face-to-region (beg end)
+  "Add a md-ts-owned bare `link' face to BEG..END where not already present."
+  (let ((pos beg))
+    (while (< pos end)
+      (let ((next (md-ts--next-link-face-property-change pos end)))
+        (unless (md-ts--link-face-value-p (get-text-property pos 'face))
+          (add-face-text-property pos next 'link t)
+          (put-text-property pos next 'md-ts-bare-link-face t))
+        (setq pos next)))))
+
+(defun md-ts--remove-link-face-from-region (beg end)
+  "Remove md-ts-owned bare `link' face from BEG to END."
+  (let ((pos beg))
+    (while (< pos end)
+      (let* ((next (md-ts--next-link-face-property-change pos end))
+             (owned (get-text-property pos 'md-ts-bare-link-face))
+             (face (get-text-property pos 'face))
+             (new-face (and owned (md-ts--remove-link-face-value face))))
+        (when owned
+          (unless (equal face new-face)
+            (put-text-property pos next 'face new-face))
+          (remove-text-properties pos next '(md-ts-bare-link-face nil)))
+        (setq pos next)))))
+
+(defun md-ts--static-bare-text-link-button-p (pos)
+  "Return non-nil if POS has an md-ts-owned static bare text button."
+  (and (md-ts--current-text-link-button-p pos)
+       (get-text-property pos 'md-ts-link-static-target)))
+
+(defun md-ts--remove-bare-link-button-properties (beg end)
+  "Remove md-ts-owned static bare link properties from BEG to END.
+Parsed Markdown link buttons and foreign text or overlay buttons are
+left intact."
+  (with-silent-modifications
+    (let ((inhibit-read-only t))
+      (save-restriction
+        (widen)
+        (let ((pos (min (max beg (point-min)) (point-max)))
+              (limit (min (max end (point-min)) (point-max))))
+          (while (< pos limit)
+            (cond
+             ((md-ts--static-bare-text-link-button-p pos)
+              (pcase-let ((`(,span-beg . ,span-end)
+                           (md-ts--property-span pos 'button)))
+                (md-ts--remove-link-face-from-region span-beg span-end)
+                (remove-text-properties
+                 span-beg span-end md-ts--link-button-properties)
+                (setq pos (min limit (max (1+ pos) span-end)))))
+             ((get-text-property pos 'md-ts-link-static-target)
+              (pcase-let ((`(,span-beg . ,span-end)
+                           (md-ts--link-button-property-segment pos)))
+                (when (md-ts--stale-link-help-echo-p pos)
+                  (remove-text-properties span-beg span-end '(help-echo nil)))
+                (md-ts--remove-link-face-from-region span-beg span-end)
+                (remove-text-properties
+                 span-beg span-end md-ts--link-button-residual-properties)
+                (setq pos (min limit (max (1+ pos) span-end)))))
+             (t
+              (setq pos (or (next-single-property-change
+                             pos 'md-ts-link-static-target nil limit)
+                            limit))))))))))
+
+(defun md-ts--foreign-display-property-in-region-p (beg end)
+  "Return non-nil if unowned `display' occurs from BEG to END."
+  (let ((pos beg)
+        found)
+    (while (and (< pos end) (not found))
+      (let ((display (get-text-property pos 'display)))
+        (when (and display
+                   (not (equal display
+                               (get-text-property pos 'md-ts-display))))
+          (setq found t)))
+      (setq pos (or (next-property-change pos nil end) end)))
+    found))
+
+(defun md-ts--put-display-property (beg end display)
+  "Set md-ts-owned DISPLAY property from BEG to END."
+  (unless (md-ts--foreign-display-property-in-region-p beg end)
+    (put-text-property beg end 'display display)
+    (put-text-property beg end 'md-ts-display display)))
+
+(defun md-ts--display-property-span (pos)
+  "Return the md-ts-owned display property span around POS."
+  (cons (or (previous-single-property-change
+             (min (1+ pos) (point-max)) 'md-ts-display nil (point-min))
+            (point-min))
+        (or (next-single-property-change
+             pos 'md-ts-display nil (point-max))
+            (point-max))))
+
+(defun md-ts--remove-display-properties (beg end)
+  "Remove md-ts-owned display properties from BEG to END.
+Foreign `display' properties without `md-ts-display' ownership are
+left intact."
+  (with-silent-modifications
+    (let ((inhibit-read-only t))
+      (save-restriction
+        (widen)
+        (let ((pos (min (max beg (point-min)) (point-max)))
+              (limit (min (max end (point-min)) (point-max))))
+          (while (< pos limit)
+            (let ((owned-display (get-text-property pos 'md-ts-display)))
+              (if owned-display
+                  (pcase-let ((`(,span-beg . ,span-end)
+                               (md-ts--display-property-span pos)))
+                    (let ((display-pos span-beg))
+                      (while (< display-pos span-end)
+                        (let ((display-end
+                               (or (next-single-property-change
+                                    display-pos 'display nil span-end)
+                                   span-end)))
+                          (when (equal (get-text-property display-pos
+                                                          'display)
+                                       owned-display)
+                            (remove-text-properties display-pos display-end
+                                                    '(display nil)))
+                          (setq display-pos display-end))))
+                    (remove-text-properties span-beg span-end
+                                            '(md-ts-display nil))
+                    (setq pos (min limit (max (1+ pos) span-end))))
+                (setq pos (or (next-single-property-change
+                               pos 'md-ts-display nil limit)
+                              limit))))))))))
+
 (defun md-ts--font-lock-unfontify-region (beg end)
-  "Unfontify BEG to END and clean md-ts-owned link buttons."
-  (md-ts--remove-link-button-properties beg end)
-  (font-lock-default-unfontify-region beg end))
+  "Unfontify BEG to END and clean md-ts-owned side effects."
+  (with-silent-modifications
+    (let ((inhibit-read-only t))
+      (md-ts--remove-display-properties beg end)
+      (md-ts--remove-bare-link-button-properties beg end)
+      (md-ts--remove-link-button-properties beg end)
+      (font-lock-default-unfontify-region beg end))))
+
+(defconst md-ts--bare-link-unsafe-node-types
+  '("inline_link" "full_reference_link" "collapsed_reference_link"
+    "shortcut_link" "image" "link_reference_definition"
+    "uri_autolink" "email_autolink" "link_destination"
+    "code_span" "fenced_code_block" "indented_code_block"
+    "code_fence_content" "info_string" "html_block" "html_tag")
+  "Tree-sitter node types where bare link scanning should not apply.")
+
+(defconst md-ts--bare-link-reference-definition-no-cache
+  'md-ts--bare-link-reference-definition-no-cache
+  "Sentinel for uncached bare-link reference-definition checks.")
+
+(defvar md-ts--bare-link-reference-definition-ranges
+  md-ts--bare-link-reference-definition-no-cache
+  "Dynamically bound reference-definition ranges for bare-link scans.")
+
+(defun md-ts--node-has-ancestor-type-p (node types)
+  "Return non-nil if NODE or an ancestor has one of TYPES."
+  (let (found)
+    (while (and node (not found))
+      (when (member (treesit-node-type node) types)
+        (setq found node))
+      (setq node (treesit-node-parent node)))
+    found))
+
+(defun md-ts--link-reference-definition-ranges (beg end)
+  "Return parsed reference-definition ranges between BEG and END."
+  (when-let* ((root (ignore-errors (treesit-buffer-root-node 'markdown))))
+    (mapcar (lambda (capture)
+              (let ((node (cdr capture)))
+                (cons (treesit-node-start node)
+                      (treesit-node-end node))))
+            (treesit-query-capture root
+                                   '((link_reference_definition) @definition)
+                                   beg end))))
+
+(defun md-ts--range-in-reference-definition-ranges-p (beg end ranges)
+  "Return non-nil when BEG to END is inside one of RANGES."
+  (seq-some (lambda (range)
+              (and (<= (car range) beg)
+                   (<= end (cdr range))))
+            ranges))
+
+(defun md-ts--range-in-link-reference-definition-p (beg end)
+  "Return non-nil when BEG to END is inside a reference definition."
+  (if (eq md-ts--bare-link-reference-definition-ranges
+          md-ts--bare-link-reference-definition-no-cache)
+      (pcase-let ((`(,line-beg . ,line-end) (md-ts--line-bounds beg end)))
+        (md-ts--range-in-reference-definition-ranges-p
+         beg end
+         (md-ts--link-reference-definition-ranges line-beg line-end)))
+    (md-ts--range-in-reference-definition-ranges-p
+     beg end md-ts--bare-link-reference-definition-ranges)))
+
+(defun md-ts--bare-link-unsafe-context-p (beg end)
+  "Return non-nil when BEG to END is not prose for bare links."
+  (let ((last-pos (max beg (1- end))))
+    (or (seq-some
+         (lambda (node)
+           (md-ts--node-has-ancestor-type-p
+            node md-ts--bare-link-unsafe-node-types))
+         (list (md-ts--node-at-containing-position beg 'markdown-inline)
+               (md-ts--node-at-containing-position last-pos 'markdown-inline)
+               (md-ts--node-at-containing-position beg 'markdown)
+               (md-ts--node-at-containing-position last-pos 'markdown)))
+        ;; Fall back to the more expensive definition query only when cheap
+        ;; point-context checks did not classify the match.
+        (md-ts--range-in-link-reference-definition-p beg end))))
+
+(defun md-ts--button-overlaps-region-p (beg end)
+  "Return non-nil when any text or overlay button overlaps BEG to END."
+  (or (seq-some (lambda (overlay)
+                  (and (overlay-get overlay 'button) overlay))
+                (overlays-in beg end))
+      (let ((pos beg)
+            found)
+        (while (and (< pos end) (not found))
+          (if (get-text-property pos 'button)
+              (setq found t)
+            (setq pos (or (next-single-property-change
+                           pos 'button nil end)
+                          end))))
+        found)))
+
+(defconst md-ts--bare-link-terminal-punctuation '(?. ?, ?\; ?\: ?\! ?\?)
+  "Prose punctuation trimmed from the end of bare link matches.")
+
+(defconst md-ts--bare-link-closing-delimiters
+  '((?\) . ?\() (?\] . ?\[) (?\} . ?\{) (?> . ?<))
+  "Closing delimiters trimmed from bare links when unmatched.")
+
+(defun md-ts--bare-link-matched-closing-delimiters (text)
+  "Return a boolean vector for matched closing delimiters in TEXT."
+  (let* ((len (length text))
+         (matched (make-vector len nil))
+         parens brackets braces angles)
+    (dotimes (i len)
+      (pcase (aref text i)
+        (?\( (push i parens))
+        (?\) (when parens
+               (setq parens (cdr parens))
+               (aset matched i t)))
+        (?\[ (push i brackets))
+        (?\] (when brackets
+               (setq brackets (cdr brackets))
+               (aset matched i t)))
+        (?\{ (push i braces))
+        (?\} (when braces
+               (setq braces (cdr braces))
+               (aset matched i t)))
+        (?< (push i angles))
+        (?> (when angles
+              (setq angles (cdr angles))
+              (aset matched i t)))))
+    matched))
+
+(defun md-ts--bare-link-normalized-match (beg end)
+  "Return normalized (BEG END TEXT) for a bare link match.
+Terminal prose punctuation and unmatched closing delimiters are
+trimmed from END.  Balanced URL delimiters, notably parentheses in
+URL paths, are preserved."
+  (let* ((text (buffer-substring-no-properties beg end))
+         (trim-length (length text))
+         (matched-closers
+          (md-ts--bare-link-matched-closing-delimiters text)))
+    (while
+        (and (> trim-length 0)
+             (let* ((last-pos (1- trim-length))
+                    (last (aref text last-pos)))
+               (or (memq last md-ts--bare-link-terminal-punctuation)
+                   (and (alist-get last md-ts--bare-link-closing-delimiters)
+                        (not (aref matched-closers last-pos))))))
+      (setq trim-length (1- trim-length)))
+    (let ((normalized-end (+ beg trim-length)))
+      (list beg normalized-end (substring text 0 trim-length)))))
+
+(defun md-ts--regions-intersect-p (beg end other-beg other-end)
+  "Return non-nil when BEG..END intersects OTHER-BEG..OTHER-END."
+  (if (= other-beg other-end)
+      (and (<= beg other-beg) (< other-beg end))
+    (and (< beg other-end) (< other-beg end))))
+
+(defun md-ts--fontify-bare-link (beg end target)
+  "Fontify BEG to END as a bare prose link to static TARGET."
+  (with-silent-modifications
+    (let ((inhibit-read-only t))
+      (md-ts--add-link-face-to-region beg end)
+      (md-ts--make-link-button beg end target nil target))))
+
+(defun md-ts--fontify-bare-links-with-regexp
+    (regexp scan-beg scan-end apply-beg apply-end target-function)
+  "Fontify bare links matching REGEXP between SCAN-BEG and SCAN-END.
+Only matches intersecting APPLY-BEG to APPLY-END are applied.
+TARGET-FUNCTION is called with normalized match text and returns
+the static activation target.  URL matching is intentionally
+case-insensitive so uppercase schemes are recognized even when
+`case-fold-search' is nil."
+  (goto-char scan-beg)
+  (while (re-search-forward regexp scan-end t)
+    (pcase-let* ((`(,match-beg ,match-end ,text)
+                  (md-ts--bare-link-normalized-match
+                   (match-beginning 0) (match-end 0)))
+                 (target (funcall target-function text)))
+      (unless (or (<= match-end match-beg)
+                  (not (md-ts--regions-intersect-p
+                        match-beg match-end apply-beg apply-end))
+                  (string-empty-p target)
+                  (md-ts--button-overlaps-region-p match-beg match-end)
+                  (md-ts--bare-link-unsafe-context-p match-beg match-end))
+        (md-ts--fontify-bare-link match-beg match-end target)))))
+
+(defun md-ts--fontify-bare-links (beg end)
+  "Fontify bare URLs and email addresses on lines covering BEG to END."
+  (pcase-let ((`(,scan-beg . ,scan-end) (md-ts--line-bounds beg end)))
+    (with-silent-modifications
+      (let ((inhibit-read-only t))
+        (save-restriction
+          (widen)
+          (md-ts--remove-bare-link-button-properties scan-beg scan-end)
+          (save-excursion
+            (save-match-data
+              (let ((case-fold-search t)
+                    (md-ts--bare-link-reference-definition-ranges
+                     (md-ts--link-reference-definition-ranges
+                      scan-beg scan-end)))
+                (md-ts--fontify-bare-links-with-regexp
+                 goto-address-url-regexp
+                 scan-beg scan-end scan-beg scan-end #'identity)
+                (md-ts--fontify-bare-links-with-regexp
+                 goto-address-mail-regexp
+                 scan-beg scan-end scan-beg scan-end
+                 (lambda (address) (concat "mailto:" address)))))))))))
+
+(defvar-local md-ts--font-lock-stale-side-effect-bounds nil
+  "Old side-effect node bounds recorded before destructive edits.
+Indirect buffers share text properties, so this list is stored and
+consumed on the base buffer when one exists.  Each element is a
+cons of markers in shared buffer coordinates.")
+
+(defun md-ts--font-lock-state-buffer ()
+  "Return the buffer that owns shared font-lock side-effect state."
+  (or (buffer-base-buffer) (current-buffer)))
+
+(defun md-ts--font-lock-stale-side-effect-bounds ()
+  "Return shared stale side-effect bounds for the current buffer family."
+  (with-current-buffer (md-ts--font-lock-state-buffer)
+    md-ts--font-lock-stale-side-effect-bounds))
+
+(defun md-ts--font-lock-set-stale-side-effect-bounds (bounds)
+  "Set shared stale side-effect BOUNDS for the current buffer family."
+  (with-current-buffer (md-ts--font-lock-state-buffer)
+    (setq md-ts--font-lock-stale-side-effect-bounds bounds)))
+
+(defun md-ts--font-lock-push-stale-side-effect-bounds (beg end)
+  "Record shared stale side-effect bounds BEG..END."
+  (with-current-buffer (md-ts--font-lock-state-buffer)
+    (push (cons (copy-marker beg)
+                (copy-marker end t))
+          md-ts--font-lock-stale-side-effect-bounds)))
+
+(defconst md-ts--font-lock-side-effect-properties
+  '(md-ts-link-button md-ts-link-help-echo md-ts-link-static-target
+    md-ts-bare-link-face md-ts-display invisible font-lock-multiline)
+  "Text properties that can identify old md-ts side-effect spans.")
+
+(defun md-ts--font-lock-side-effect-node-queries ()
+  "Return queries for nodes whose callbacks may write past requested bounds."
+  `((markdown . (,@(when md-ts-hide-markup
+                    '((fenced_code_block) @node))
+                 (link_reference_definition) @node))
+    (markdown-inline . ((inline_link) @node
+                        (image) @node
+                        (full_reference_link) @node
+                        (collapsed_reference_link) @node
+                        (shortcut_link) @node
+                        (uri_autolink) @node
+                        (email_autolink) @node))))
+
+(defun md-ts--font-lock-line-fontify-bounds (beg end)
+  "Return line-based fontification bounds covering BEG through END."
+  (pcase-let ((`(,line-beg . ,line-end) (md-ts--line-bounds beg end)))
+    (cons line-beg
+          (if (< line-end (point-max))
+              (1+ line-end)
+            line-end))))
+
+(defun md-ts--font-lock-parser-language (parser)
+  "Return PARSER's language, or nil after safely discarding bad parsers."
+  (condition-case nil
+      (treesit-parser-language parser)
+    (error
+     (ignore-errors (treesit-parser-delete parser))
+     nil)))
+
+(defun md-ts--font-lock-prune-invalid-local-parsers (beg end)
+  "Delete local-parser overlays with invalid parser objects in BEG..END."
+  (dolist (overlay (overlays-in beg end))
+    (when-let* ((parser (overlay-get overlay 'treesit-parser)))
+      (unless (md-ts--font-lock-parser-language parser)
+        (delete-overlay overlay)))))
+
+(defun md-ts--font-lock-root-nodes (beg end language)
+  "Return tree-sitter root nodes for LANGUAGE overlapping BEG to END."
+  (let* ((local-parsers (seq-filter
+                         (lambda (parser)
+                           (eq (md-ts--font-lock-parser-language parser)
+                               language))
+                         (ignore-errors
+                           (treesit-local-parsers-on beg end))))
+         (global-parsers (seq-filter
+                          (lambda (parser)
+                            (eq (md-ts--font-lock-parser-language parser)
+                                language))
+                          (ignore-errors
+                            (md-ts--parser-list nil nil)))))
+    (delq nil
+          (mapcar (lambda (parser)
+                    (ignore-errors (treesit-parser-root-node parser)))
+                  (append local-parsers global-parsers)))))
+
+(defun md-ts--font-lock-multiline-node-p (node)
+  "Return non-nil when NODE spans more than one physical line."
+  (save-excursion
+    (let ((start-line (progn
+                        (goto-char (treesit-node-start node))
+                        (line-beginning-position)))
+          (end-line (progn
+                      (goto-char (max (treesit-node-start node)
+                                      (1- (treesit-node-end node))))
+                      (line-beginning-position))))
+      (/= start-line end-line))))
+
+(defun md-ts--font-lock-owned-side-effect-property-p (pos)
+  "Return non-nil when POS has an md-ts-owned side-effect property."
+  (or (get-text-property pos 'md-ts-link-button)
+      (get-text-property pos 'md-ts-link-help-echo)
+      (get-text-property pos 'md-ts-link-static-target)
+      (get-text-property pos 'md-ts-bare-link-face)
+      (get-text-property pos 'md-ts-display)
+      (eq (get-text-property pos 'invisible) 'md-ts--markup)
+      (get-text-property pos 'font-lock-multiline)))
+
+(defun md-ts--font-lock-side-effect-property-span (pos)
+  "Return md-ts side-effect property span around POS."
+  (let ((beg pos)
+        (end (1+ pos)))
+    (dolist (prop md-ts--font-lock-side-effect-properties)
+      (when (cond
+             ((eq prop 'invisible)
+              (eq (get-text-property pos prop) 'md-ts--markup))
+             (t
+              (get-text-property pos prop)))
+        (setq beg (min beg (or (previous-single-property-change
+                                 (min (1+ pos) (point-max)) prop nil
+                                 (point-min))
+                                (point-min)))
+              end (max end (or (next-single-property-change
+                                 pos prop nil (point-max))
+                                (point-max))))))
+    (cons beg end)))
+
+(defun md-ts--font-lock-next-side-effect-property-change (pos limit)
+  "Return next possible md-ts side-effect property change after POS before LIMIT."
+  (cl-loop for prop in md-ts--font-lock-side-effect-properties
+           minimize (or (next-single-property-change pos prop nil limit)
+                        limit)))
+
+(defun md-ts--font-lock-expand-bounds-for-properties (beg end)
+  "Expand BEG..END over existing md-ts side-effect property spans."
+  (let ((fontify-beg beg)
+        (fontify-end end)
+        (pos beg))
+    (while (< pos fontify-end)
+      (if (md-ts--font-lock-owned-side-effect-property-p pos)
+          (pcase-let* ((`(,span-beg . ,span-end)
+                        (md-ts--font-lock-side-effect-property-span pos))
+                       (`(,expanded-beg . ,expanded-end)
+                        (md-ts--font-lock-line-fontify-bounds
+                         (min fontify-beg span-beg)
+                         (max fontify-end span-end))))
+            (setq fontify-beg expanded-beg
+                  fontify-end expanded-end
+                  pos (min fontify-end (max (1+ pos) span-end))))
+        (setq pos (md-ts--font-lock-next-side-effect-property-change
+                   pos fontify-end))))
+    (cons fontify-beg fontify-end)))
+
+(defun md-ts--font-lock-consume-stale-side-effect-bounds (beg end)
+  "Return and consume stale side-effect bounds intersecting BEG..END."
+  (let (bounds keep)
+    (dolist (range (md-ts--font-lock-stale-side-effect-bounds))
+      (let ((range-beg (marker-position (car range)))
+            (range-end (marker-position (cdr range))))
+        (cond
+         ((or (not range-beg) (not range-end) (>= range-beg range-end))
+          (set-marker (car range) nil)
+          (set-marker (cdr range) nil))
+         ((md-ts--regions-intersect-p beg end range-beg range-end)
+          (push (cons range-beg range-end) bounds)
+          (set-marker (car range) nil)
+          (set-marker (cdr range) nil))
+         (t
+          (push range keep)))))
+    (md-ts--font-lock-set-stale-side-effect-bounds (nreverse keep))
+    (nreverse bounds)))
+
+(defun md-ts--font-lock-record-stale-side-effect-bounds (beg end)
+  "Record old multi-line side-effect node bounds touched by BEG..END."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (pcase-let ((`(,fontify-beg . ,fontify-end)
+                   (md-ts--font-lock-line-fontify-bounds beg end)))
+        (dolist (spec (md-ts--font-lock-side-effect-node-queries))
+          (pcase-let ((`(,language . ,query) spec))
+            (dolist (root (md-ts--font-lock-root-nodes
+                           fontify-beg fontify-end language))
+              (dolist (capture (ignore-errors
+                                  (treesit-query-capture
+                                   root query fontify-beg fontify-end)))
+                (let ((node (cdr capture)))
+                  (when (and (md-ts--font-lock-multiline-node-p node)
+                             (md-ts--regions-intersect-p
+                              fontify-beg fontify-end
+                              (treesit-node-start node)
+                              (treesit-node-end node)))
+                    (pcase-let ((`(,expanded-beg . ,expanded-end)
+                                 (md-ts--font-lock-line-fontify-bounds
+                                  (treesit-node-start node)
+                                  (treesit-node-end node))))
+                      (md-ts--font-lock-push-stale-side-effect-bounds
+                       expanded-beg expanded-end))))))))))))
+
+(defun md-ts--font-lock-expand-bounds-for-side-effects (beg end)
+  "Expand BEG..END to cover multi-line callback side-effect nodes.
+The returned bounds remain line-based so bare-link scanning cannot
+mutate outside the bounds reported to jit-lock."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (md-ts--font-lock-prune-invalid-local-parsers beg end)
+      (ignore-errors (treesit-update-ranges beg end))
+      (pcase-let ((`(,fontify-beg . ,fontify-end)
+                   (md-ts--font-lock-line-fontify-bounds beg end)))
+        (let ((changed t))
+          (while changed
+            (setq changed nil)
+            (pcase-let ((`(,prop-beg . ,prop-end)
+                         (md-ts--font-lock-expand-bounds-for-properties
+                          fontify-beg fontify-end)))
+              (unless (and (= prop-beg fontify-beg)
+                           (= prop-end fontify-end))
+                (setq fontify-beg prop-beg
+                      fontify-end prop-end
+                      changed t)))
+            (dolist (range (md-ts--font-lock-consume-stale-side-effect-bounds
+                            fontify-beg fontify-end))
+              (pcase-let ((`(,expanded-beg . ,expanded-end)
+                           (md-ts--font-lock-line-fontify-bounds
+                            (min fontify-beg (car range))
+                            (max fontify-end (cdr range)))))
+                (unless (and (= expanded-beg fontify-beg)
+                             (= expanded-end fontify-end))
+                  (setq fontify-beg expanded-beg
+                        fontify-end expanded-end
+                        changed t))))
+            (dolist (spec (md-ts--font-lock-side-effect-node-queries))
+              (pcase-let ((`(,language . ,query) spec))
+                (dolist (root (md-ts--font-lock-root-nodes
+                               fontify-beg fontify-end language))
+                  (dolist (capture (ignore-errors
+                                      (treesit-query-capture
+                                       root query fontify-beg fontify-end)))
+                    (let ((node (cdr capture)))
+                      (when (and (md-ts--font-lock-multiline-node-p node)
+                                 (md-ts--regions-intersect-p
+                                  fontify-beg fontify-end
+                                  (treesit-node-start node)
+                                  (treesit-node-end node)))
+                        (pcase-let ((`(,expanded-beg . ,expanded-end)
+                                     (md-ts--font-lock-line-fontify-bounds
+                                      (min fontify-beg (treesit-node-start node))
+                                      (max fontify-end (treesit-node-end node)))))
+                          (unless (and (= expanded-beg fontify-beg)
+                                       (= expanded-end fontify-end))
+                            (setq fontify-beg expanded-beg
+                                  fontify-end expanded-end
+                                  changed t)))))))))))
+        (cons fontify-beg fontify-end)))))
+
+(defun md-ts--font-lock-fontify-region (beg end &optional loudly)
+  "Fontify BEG to END with tree-sitter plus bare prose links.
+LOUDLY is passed to `treesit-font-lock-fontify-region'.  Return
+jit-lock bounds for the expanded physical lines fontified and bare-scanned."
+  (pcase-let ((`(,fontify-beg . ,fontify-end)
+               (md-ts--font-lock-expand-bounds-for-side-effects beg end)))
+    (save-restriction
+      (widen)
+      (md-ts--remove-display-properties fontify-beg fontify-end)
+      (md-ts--font-lock-prune-invalid-local-parsers fontify-beg fontify-end)
+      (treesit-font-lock-fontify-region fontify-beg fontify-end loudly))
+    (md-ts--fontify-bare-links fontify-beg fontify-end)
+    `(jit-lock-bounds ,fontify-beg . ,fontify-end)))
 
 (defun md-ts--link-target-at-point (&optional pos)
   "Return the parsed Markdown link target at POS, or nil.
@@ -1854,11 +2486,62 @@ parsed markup belonging to a link."
                     (md-ts--node-at-containing-position
                      pos 'markdown)))))
 
+(defun md-ts--bare-link-target-at-point-with-regexp
+    (pos regexp line-beg line-end target-function)
+  "Return bare-link target at POS matching REGEXP, or nil.
+LINE-BEG and LINE-END bound the scan.  TARGET-FUNCTION maps the
+normalized match text to an opener target."
+  (save-excursion
+    (goto-char line-beg)
+    (catch 'target
+      (while (re-search-forward regexp line-end t)
+        (pcase-let* ((`(,match-beg ,match-end ,text)
+                      (md-ts--bare-link-normalized-match
+                       (match-beginning 0) (match-end 0)))
+                     (target (funcall target-function text)))
+          (when (and (<= match-beg pos)
+                     (< pos match-end)
+                     (not (string-empty-p target))
+                     (not (md-ts--bare-link-unsafe-context-p
+                           match-beg match-end)))
+            (throw 'target target)))))))
+
+(defun md-ts--bare-link-target-at-point (&optional pos)
+  "Return current valid bare URL/email target at POS, or nil.
+This recomputes from buffer text and parser context instead of
+trusting possibly stale static button properties."
+  (let ((pos (or pos (point))))
+    (pcase-let ((`(,line-beg . ,line-end) (md-ts--line-bounds pos pos)))
+      (save-restriction
+        (widen)
+        (save-match-data
+          (let ((case-fold-search t)
+                (md-ts--bare-link-reference-definition-ranges
+                 (md-ts--link-reference-definition-ranges
+                  line-beg line-end)))
+            (or (md-ts--bare-link-target-at-point-with-regexp
+                 pos goto-address-url-regexp line-beg line-end #'identity)
+                (md-ts--bare-link-target-at-point-with-regexp
+                 pos goto-address-mail-regexp line-beg line-end
+                 (lambda (address) (concat "mailto:" address))))))))))
+
 (defun md-ts--open-link-button (button)
-  "Open Markdown link BUTTON by resolving its current parsed target."
-  (if-let* ((url (md-ts--link-target-at-point (button-start button))))
-      (md-ts--open-link-destination url)
-    (user-error "No Markdown link target at point")))
+  "Open Markdown link BUTTON.
+Static bare-link buttons prefer recomputing their current bare
+link target at activation time.  Parsed Markdown buttons prefer
+resolving the parsed target at activation time so reference links
+stay fresh.  If stale button properties no longer match the
+current buffer syntax, fall back to the other resolver before
+signaling."
+  (let* ((pos (button-start button))
+         (url (if (button-get button 'md-ts-link-static-target)
+                  (or (md-ts--bare-link-target-at-point pos)
+                      (md-ts--link-target-at-point pos))
+                (or (md-ts--link-target-at-point pos)
+                    (md-ts--bare-link-target-at-point pos)))))
+    (if url
+        (md-ts--open-link-destination url)
+      (user-error "No link target at point"))))
 
 (defun md-ts--link-button-p (button)
   "Return non-nil if BUTTON is a current md-ts Markdown link button."
@@ -1877,11 +2560,12 @@ Markdown-inline parser ranges and link button properties in fresh
                       (line-end-position))))
 
 (defun md-ts-open-link-at-point ()
-  "Open the Markdown link at point.
+  "Open the Markdown or bare prose link at point.
 If point is on buttonized link text, activate that button.  If
-point is on parsed Markdown link markup, resolve the same target
-and open it with `md-ts--open-link-destination'.  Signal a
-`user-error' when point is not on a supported Markdown link."
+point is on parsed Markdown link markup, resolve the same target.
+Otherwise, fall back to a revalidated bare URL/email target at
+point.  Open targets with `md-ts--open-link-destination'.  Signal
+a `user-error' when point is not on a supported link."
   (interactive)
   (md-ts--ensure-link-fontification-at-point)
   (let ((button (button-at (point))))
@@ -1889,10 +2573,11 @@ and open it with `md-ts--open-link-destination'.  Signal a
     ;; buttons fall through to parser resolution, never to `push-button'.
     (if (md-ts--link-button-p button)
         (push-button (point))
-      (let ((url (md-ts--link-target-at-point)))
+      (let ((url (or (md-ts--link-target-at-point)
+                     (md-ts--bare-link-target-at-point))))
         (if url
             (md-ts--open-link-destination url)
-          (user-error "No Markdown link at point"))))))
+          (user-error "No Markdown or bare link at point"))))))
 
 (defvar md-ts-mode-map (make-sparse-keymap)
   "Keymap for `md-ts-mode'.")
@@ -1914,13 +2599,19 @@ and open it with `md-ts--open-link-destination'.  Signal a
                       (lambda (prop)
                         (memq prop '(button category action help-echo
                                      md-ts-link-button
-                                     md-ts-link-help-echo)))
+                                     md-ts-link-help-echo
+                                     md-ts-link-static-target)))
                       font-lock-extra-managed-props))))
   (setq-local font-lock-unfontify-region-function
               #'md-ts--font-lock-unfontify-region)
   (save-restriction
     (widen)
+    (md-ts--remove-display-properties (point-min) (point-max))
+    (md-ts--remove-bare-link-button-properties (point-min) (point-max))
     (md-ts--remove-link-button-properties (point-min) (point-max)))
+  (md-ts--font-lock-set-stale-side-effect-bounds nil)
+  (add-hook 'before-change-functions
+            #'md-ts--font-lock-record-stale-side-effect-bounds nil t)
   (add-hook 'before-change-functions
             #'md-ts--before-change-check-link-reference-definition nil t)
   (add-hook 'after-change-functions
@@ -1989,6 +2680,8 @@ and open it with `md-ts--open-link-destination'.  Signal a
                          '((plus_metadata) @toml)))))
 
   (treesit-major-mode-setup)
+  (setq-local font-lock-fontify-region-function
+              #'md-ts--font-lock-fontify-region)
   (md-ts--set-hide-markup md-ts-hide-markup)
 
   ;; Append md-ts-code rules LAST so they run after all embedded

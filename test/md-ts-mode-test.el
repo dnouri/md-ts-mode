@@ -90,6 +90,23 @@ NTH selects occurrence (default 1)."
                     props)))
       (kill-buffer buf))))
 
+(defun md-ts-test--jit-lock-bounds (result)
+  "Return the bounds cons from a `jit-lock-bounds' RESULT."
+  (should (eq (car result) 'jit-lock-bounds))
+  (cons (cadr result) (cddr result)))
+
+(defun md-ts-test--property-outside-region (beg end props)
+  "Return the first (POS . PROP) from PROPS outside BEG..END, or nil."
+  (let ((pos (point-min))
+        found)
+    (while (and (< pos (point-max)) (not found))
+      (unless (and (<= beg pos) (< pos end))
+        (dolist (prop props)
+          (when (and (not found) (get-text-property pos prop))
+            (setq found (cons pos prop)))))
+      (setq pos (1+ pos)))
+    found))
+
 (defun md-ts-test--button-at-search (text search &optional nth)
   "Non-nil if SEARCH in markdown TEXT is a text button.
 NTH selects occurrence (default 1)."
@@ -576,10 +593,13 @@ This allows themes to provide their own heading heights."
         (with-current-buffer buf
           (goto-char (point-min))
           (search-forward "---")
-          (let ((disp (get-text-property (match-beginning 0) 'display)))
+          (let* ((pos (match-beginning 0))
+                 (disp (get-text-property pos 'display)))
             (should disp)
             (should (stringp disp))
-            (should (string-match-p "─" disp))))
+            (should (string-match-p "─" disp))
+            (should (equal (get-text-property pos 'md-ts-display)
+                           disp))))
       (kill-buffer buf))))
 
 (ert-deftest md-ts-test-fenced-code-block ()
@@ -648,7 +668,9 @@ not a delimiter that should be hidden."
         (with-current-buffer buf
           (goto-char (point-min))
           (search-forward "[ ]")
-          (should (equal (get-text-property (match-beginning 0) 'display) "☐")))
+          (should (equal (get-text-property (match-beginning 0) 'display) "☐"))
+          (should (equal (get-text-property (match-beginning 0) 'md-ts-display)
+                         "☐")))
       (kill-buffer buf))))
 
 (ert-deftest md-ts-test-task-list-display-checked ()
@@ -658,7 +680,144 @@ not a delimiter that should be hidden."
         (with-current-buffer buf
           (goto-char (point-min))
           (search-forward "[x]")
-          (should (equal (get-text-property (match-beginning 0) 'display) "☑")))
+          (should (equal (get-text-property (match-beginning 0) 'display) "☑"))
+          (should (equal (get-text-property (match-beginning 0) 'md-ts-display)
+                         "☑")))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-thematic-break-partial-edit-cleans-stale-display ()
+  "Breaking a thematic break should remove md-ts-owned display props."
+  (let ((buf (md-ts-test--fontify "Before\n\n---\n\nAfter\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "---")
+          (let ((dash-beg (match-beginning 0)))
+            (should (get-text-property dash-beg 'display))
+            (should (equal (get-text-property dash-beg 'md-ts-display)
+                           (get-text-property dash-beg 'display)))
+            (delete-region dash-beg (1+ dash-beg))
+            (funcall font-lock-fontify-region-function
+                     dash-beg (min (point-max) (1+ dash-beg)) nil)
+            (goto-char dash-beg)
+            (let ((line-beg (line-beginning-position))
+                  (line-end (line-end-position)))
+              (should-not (cl-loop for pos from line-beg below line-end
+                                   thereis (get-text-property pos
+                                                              'md-ts-display)))
+              (should-not (cl-loop for pos from line-beg below line-end
+                                   thereis (get-text-property pos 'display))))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-task-marker-partial-edit-cleans-stale-display ()
+  "Breaking a task marker should remove md-ts-owned display props."
+  (let ((buf (md-ts-test--fontify "- [ ] todo\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "[ ]")
+          (let ((marker-beg (match-beginning 0)))
+            (should (equal (get-text-property marker-beg 'display) "☐"))
+            (should (equal (get-text-property marker-beg 'md-ts-display) "☐"))
+            (goto-char (1+ marker-beg))
+            (delete-char 1)
+            (funcall font-lock-fontify-region-function
+                     marker-beg (min (point-max) (+ marker-beg 2)) nil)
+            (goto-char marker-beg)
+            (let ((line-beg (line-beginning-position))
+                  (line-end (line-end-position)))
+              (should-not (cl-loop for pos from line-beg below line-end
+                                   thereis (get-text-property pos
+                                                              'md-ts-display)))
+              (should-not (cl-loop for pos from line-beg below line-end
+                                   thereis (get-text-property pos 'display))))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-display-cleanup-read-only-preserves-foreign-display ()
+  "Read-only cleanup should remove md-ts displays without touching foreign display."
+  (let ((buf (md-ts-test--fontify "---\nforeign\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "---")
+          (let ((dash-beg (match-beginning 0)))
+            (should (get-text-property dash-beg 'md-ts-display))
+            (search-forward "foreign")
+            (let ((foreign-beg (match-beginning 0)))
+              (put-text-property foreign-beg (match-end 0)
+                                 'display "FOREIGN")
+              (setq buffer-undo-list nil)
+              (set-buffer-modified-p nil)
+              (setq buffer-read-only t)
+              (funcall font-lock-unfontify-region-function
+                       (point-min) (point-max))
+              (should-not (get-text-property dash-beg 'display))
+              (should-not (get-text-property dash-beg 'md-ts-display))
+              (should (equal (get-text-property foreign-beg 'display)
+                             "FOREIGN"))
+              (should-not (buffer-modified-p))
+              (should (equal buffer-undo-list nil)))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-thematic-break-preserves-overlapping-foreign-display ()
+  "Thematic break display should not overwrite overlapping foreign display."
+  (let ((buf (generate-new-buffer " *md-ts-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "---\n")
+          (put-text-property (point-min) (1- (point-max))
+                             'display "FOREIGN")
+          (md-ts-mode)
+          (font-lock-ensure)
+          (should (equal (get-text-property (point-min) 'display)
+                         "FOREIGN"))
+          (should-not (get-text-property (point-min) 'md-ts-display))
+          (funcall font-lock-unfontify-region-function
+                   (point-min) (point-max))
+          (should (equal (get-text-property (point-min) 'display)
+                         "FOREIGN"))
+          (should-not (get-text-property (point-min) 'md-ts-display)))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-task-marker-preserves-overlapping-foreign-display ()
+  "Task marker display should not overwrite overlapping foreign display."
+  (let ((buf (generate-new-buffer " *md-ts-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "- [ ] todo\n")
+          (goto-char (point-min))
+          (search-forward "[ ]")
+          (let ((marker-beg (match-beginning 0))
+                (marker-end (match-end 0)))
+            (put-text-property marker-beg marker-end 'display "FOREIGN")
+            (md-ts-mode)
+            (font-lock-ensure)
+            (should (equal (get-text-property marker-beg 'display)
+                           "FOREIGN"))
+            (should-not (get-text-property marker-beg 'md-ts-display))
+            (funcall font-lock-unfontify-region-function
+                     (point-min) (point-max))
+            (should (equal (get-text-property marker-beg 'display)
+                           "FOREIGN"))
+            (should-not (get-text-property marker-beg 'md-ts-display))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-display-cleanup-preserves-replaced-foreign-display ()
+  "Cleanup should not remove a foreign display replacing an md-ts display."
+  (let ((buf (md-ts-test--fontify "---\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (let ((dash-beg (point-min)))
+            (should (get-text-property dash-beg 'display))
+            (should (equal (get-text-property dash-beg 'md-ts-display)
+                           (get-text-property dash-beg 'display)))
+            (put-text-property dash-beg (1- (point-max))
+                               'display "FOREIGN")
+            (funcall font-lock-unfontify-region-function
+                     (point-min) (point-max))
+            (should (equal (get-text-property dash-beg 'display)
+                           "FOREIGN"))
+            (should-not (get-text-property dash-beg 'md-ts-display))))
       (kill-buffer buf))))
 
 (ert-deftest md-ts-test-bold-in-first-list-item ()
@@ -1031,20 +1190,23 @@ inline parser ranges cause the first range's faces to be dropped."
           (search-forward "link")
           (let ((pos (match-beginning 0))
                 (end (match-end 0))
-                (undo-list (list :sentinel)))
+                (undo-list (list :sentinel))
+                initial-modified)
             (make-text-button pos end
                               'md-ts-link-button t
                               'md-ts-link-help-echo "https://old.example"
                               'action #'md-ts--open-link-button
                               'help-echo "https://old.example")
+            (put-text-property pos end 'face 'link)
             (setq buffer-undo-list undo-list)
             (set-buffer-modified-p nil)
+            (setq initial-modified (buffer-modified-p))
             (setq buffer-read-only t)
             (funcall font-lock-unfontify-region-function pos end)
-            (should-not (buffer-modified-p))
+            (should (eq (buffer-modified-p) initial-modified))
             (should (eq buffer-undo-list undo-list))
             (should-not (button-at pos))
-            (dolist (prop '(button category action help-echo
+            (dolist (prop '(button category action help-echo face
                                    md-ts-link-button md-ts-link-help-echo))
               (should-not (get-text-property pos prop)))))
       (kill-buffer buf))))
@@ -2213,6 +2375,1049 @@ inline parser ranges cause the first range's faces to be dropped."
       (md-ts-test--push-button-at-search text "person@example.com"))
     (should (equal mailed '("mailto" "person@example.com")))))
 
+(ert-deftest md-ts-test-link-bare-url-button ()
+  "Bare URLs in prose should be static buttons using `browse-url'."
+  (let ((text "Visit https://example.com/path now.\n")
+        opened)
+    (should (md-ts-test--has-face text "https://example.com/path" 'link))
+    (should (equal (md-ts-test--help-echo-at-search
+                    text "https://example.com/path")
+                   "https://example.com/path"))
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--push-button-at-search text "https://example.com/path"))
+    (should (equal opened "https://example.com/path"))))
+
+(ert-deftest md-ts-test-link-bare-email-button ()
+  "Bare email addresses in prose should activate through mailto."
+  (let ((text "Email person@example.com please.\n")
+        mailed)
+    (should (md-ts-test--has-face text "person@example.com" 'link))
+    (should (equal (md-ts-test--help-echo-at-search text "person@example.com")
+                   "mailto:person@example.com"))
+    (cl-letf (((symbol-function 'url-mailto)
+               (lambda (parsed-url)
+                 (setq mailed (list (url-type parsed-url)
+                                    (url-filename parsed-url)))))
+              ((symbol-function 'browse-url)
+               (lambda (&rest _args)
+                 (ert-fail "browse-url called for bare email"))))
+      (md-ts-test--push-button-at-search text "person@example.com"))
+    (should (equal mailed '("mailto" "person@example.com")))))
+
+(ert-deftest md-ts-test-link-bare-url-trims-trailing-prose-punctuation ()
+  "Bare URL buttons should not include prose punctuation or delimiters."
+  (let ((buf (md-ts-test--fontify
+              (concat "See (https://example.com/path), "
+                      "https://example.com/a(b). "
+                      "https://example.com/a)b(c) "
+                      "https://example.com/(a)) "
+                      "and https://example.com/a(b)).\n")))
+        opened)
+    (unwind-protect
+        (with-current-buffer buf
+          (cl-letf (((symbol-function 'browse-url)
+                     (lambda (url &rest _args)
+                       (setq opened url))))
+            (let ((search-start (point-min)))
+              (dolist (target '("https://example.com/path"
+                                "https://example.com/a(b)"
+                                "https://example.com/a)b(c)"
+                                "https://example.com/(a)"
+                                "https://example.com/a(b)"))
+                (goto-char search-start)
+                (search-forward target)
+                (let ((pos (match-beginning 0))
+                      (end (match-end 0)))
+                  (setq search-start end
+                        opened nil)
+                  (let ((button (button-at pos)))
+                    (should button)
+                    (should (equal (get-text-property pos 'help-echo) target))
+                    (should (equal (cons (button-start button)
+                                         (button-end button))
+                                   (cons pos end))))
+                  (push-button pos)
+                  (should (equal opened target)))))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-normalized-match-long-trailing-run ()
+  "Bare URL normalization should trim long trailing runs without rescans."
+  (with-temp-buffer
+    (let* ((target "https://example.com/a(b)")
+           (tail (mapconcat #'identity (make-list 512 ")]}>.,;:!?") ""))
+           (substring-calls 0)
+           (buffer-substring-original
+            (symbol-function 'buffer-substring-no-properties)))
+      (insert target tail)
+      (cl-letf (((symbol-function 'buffer-substring-no-properties)
+                 (lambda (&rest args)
+                   (setq substring-calls (1+ substring-calls))
+                   (apply buffer-substring-original args))))
+        (should (equal (md-ts--bare-link-normalized-match
+                        (point-min) (point-max))
+                       (list (point-min) (+ (point-min) (length target))
+                             target))))
+      (should (<= substring-calls 1)))))
+
+(ert-deftest md-ts-test-link-open-at-point-bare-url ()
+  "`md-ts-open-link-at-point' should open bare URL buttons."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--open-link-at-search-no-fontify
+       "Visit https://example.com/path now.\n"
+       "https://example.com/path"))
+    (should (equal opened "https://example.com/path"))))
+
+(ert-deftest md-ts-test-link-open-at-point-bare-email ()
+  "`md-ts-open-link-at-point' should open bare email buttons."
+  (let (mailed)
+    (cl-letf (((symbol-function 'url-mailto)
+               (lambda (parsed-url)
+                 (setq mailed (list (url-type parsed-url)
+                                    (url-filename parsed-url)))))
+              ((symbol-function 'browse-url)
+               (lambda (&rest _args)
+                 (ert-fail "browse-url called for bare email"))))
+      (md-ts-test--open-link-at-search-no-fontify
+       "Email person@example.com please.\n"
+       "person@example.com"))
+    (should (equal mailed '("mailto" "person@example.com")))))
+
+(ert-deftest md-ts-test-link-bare-skips-markdown-link-contexts ()
+  "Bare scanners should not buttonize parsed link destinations/autolinks."
+  (let ((buf (md-ts-test--fontify
+              (concat "Visit [here](https://example.com/inline).\n"
+                      "See <https://example.com/auto>.\n"
+                      "Mail <person@example.com>.\n"
+                      "\n[id]: https://example.com/ref\n"))))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "https://example.com/inline")
+          (should-not (button-at (match-beginning 0)))
+          (should-not (get-text-property (match-beginning 0)
+                                         'md-ts-link-static-target))
+          (search-forward "https://example.com/auto")
+          (should (button-at (match-beginning 0)))
+          (should-not (get-text-property (match-beginning 0)
+                                         'md-ts-link-static-target))
+          (search-forward "person@example.com")
+          (should (button-at (match-beginning 0)))
+          (should-not (get-text-property (match-beginning 0)
+                                         'md-ts-link-static-target))
+          (search-forward "https://example.com/ref")
+          (should-not (button-at (match-beginning 0)))
+          (should-not (get-text-property (match-beginning 0)
+                                         'md-ts-link-static-target)))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-skips-code-contexts ()
+  "Bare scanners should not buttonize code spans or code blocks."
+  (let ((text (concat "Code `https://example.com/span` here.\n"
+                      "```\nhttps://example.com/fenced\n```\n"
+                      "    https://example.com/indented\n")))
+    (should-not (md-ts-test--button-at-search text "https://example.com/span"))
+    (should-not (md-ts-test--button-at-search text "https://example.com/fenced"))
+    (should-not (md-ts-test--button-at-search text "https://example.com/indented"))))
+
+(ert-deftest md-ts-test-link-bare-html-policy ()
+  "Bare scanners buttonize inline HTML text, not tags or HTML blocks."
+  (let ((buf (md-ts-test--fontify
+              (concat "<span>https://example.com/text</span>\n"
+                      "<a href=\"https://example.com/attr\">label</a>\n"
+                      "<!-- https://example.com/comment -->\n"
+                      "<div>\nhttps://example.com/block\n</div>\n"))))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "https://example.com/text")
+          (should (md-ts--link-button-p (button-at (match-beginning 0))))
+          (search-forward "https://example.com/attr")
+          (should-not (button-at (match-beginning 0)))
+          (search-forward "https://example.com/comment")
+          (should-not (button-at (match-beginning 0)))
+          (search-forward "https://example.com/block")
+          (should-not (button-at (match-beginning 0))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-url-prevents-nested-email-button ()
+  "Email-looking text inside a bare URL should keep one URL button."
+  (let ((buf (md-ts-test--fontify
+              "Visit https://user@example.com/path now.\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "https://user@example.com/path")
+          (let* ((url-beg (match-beginning 0))
+                 (url-end (match-end 0))
+                 (url-button (button-at url-beg)))
+            (should url-button)
+            (should (equal (cons (button-start url-button)
+                                 (button-end url-button))
+                           (cons url-beg url-end)))
+            (goto-char url-beg)
+            (search-forward "user@example.com")
+            (let ((mail-button (button-at (match-beginning 0))))
+              (should mail-button)
+              (should (equal (cons (button-start mail-button)
+                                   (button-end mail-button))
+                             (cons url-beg url-end)))
+              (should (equal (button-get mail-button
+                                         'md-ts-link-static-target)
+                             "https://user@example.com/path")))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-button-properties-clean-after-edit ()
+  "Editing bare links into plain text should remove md-ts props."
+  (let ((buf (md-ts-test--fontify
+              "Visit https://example.com and email person@example.com.\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "https://example.com")
+          (should (button-at (match-beginning 0)))
+          (replace-match "example" t t)
+          (search-forward "person@example.com")
+          (should (button-at (match-beginning 0)))
+          (replace-match "person" t t)
+          (font-lock-flush)
+          (font-lock-ensure)
+          (dolist (search '("example" "person"))
+            (goto-char (point-min))
+            (search-forward search)
+            (let ((pos (match-beginning 0)))
+              (should-not (button-at pos))
+              (dolist (prop '(button category action help-echo keymap
+                                     mouse-face follow-link
+                                     md-ts-link-button md-ts-link-help-echo
+                                     md-ts-link-static-target))
+                (should-not (get-text-property pos prop))))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-partial-unfontify-cleans-url-tails ()
+  "Partial unfontification inside a bare URL should clean full bare state."
+  (let ((buf (md-ts-test--fontify "Visit https://example.com/path now.\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "https://example.com/path")
+          (let* ((url-beg (match-beginning 0))
+                 (url-end (match-end 0))
+                 (unfont-beg (+ url-beg 8))
+                 (unfont-end (+ url-beg 15)))
+            (should (button-at url-beg))
+            (funcall font-lock-unfontify-region-function
+                     unfont-beg unfont-end)
+            (dolist (pos (number-sequence url-beg (1- url-end)))
+              (let ((face (get-text-property pos 'face)))
+                (should-not (if (listp face) (memq 'link face)
+                              (eq face 'link))))
+              (dolist (prop '(button category action help-echo keymap
+                                     mouse-face follow-link
+                                     md-ts-link-button md-ts-link-help-echo
+                                     md-ts-link-static-target))
+                (should-not (get-text-property pos prop))))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-foreign-button-survives-fontification ()
+  "Bare-link fontification should preserve unrelated text buttons."
+  (let ((buf (generate-new-buffer " *md-ts-test*"))
+        called)
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "Visit https://example.com now.\n")
+          (md-ts-mode)
+          (goto-char (point-min))
+          (search-forward "https://example.com")
+          (let ((pos (match-beginning 0)))
+            (make-text-button pos (match-end 0)
+                              'action (lambda (_button)
+                                        (setq called t))
+                              'help-echo "foreign")
+            (font-lock-ensure)
+            (let ((button (button-at pos)))
+              (should button)
+              (should-not (md-ts--link-button-p button))
+              (should-not (button-get button 'md-ts-link-static-target))
+              (should (equal (button-get button 'help-echo) "foreign"))
+              (push-button pos)
+              (should called))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-foreign-overlay-survives-fontification ()
+  "Bare-link fontification should preserve unrelated overlay buttons."
+  (let ((buf (generate-new-buffer " *md-ts-test*"))
+        called)
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "Visit https://example.com now.\n")
+          (md-ts-mode)
+          (goto-char (point-min))
+          (search-forward "https://example.com")
+          (let* ((pos (match-beginning 0))
+                 (overlay (make-button pos (match-end 0)
+                                       'action (lambda (_button)
+                                                 (setq called t))
+                                       'help-echo "overlay")))
+            (font-lock-ensure)
+            (should (eq (button-at pos) overlay))
+            (should-not (md-ts--link-button-p overlay))
+            (should-not (button-get overlay 'md-ts-link-static-target))
+            (dolist (prop '(button category action help-echo
+                                   md-ts-link-button md-ts-link-help-echo
+                                   md-ts-link-static-target))
+              (should-not (get-text-property pos prop)))
+            (push-button pos)
+            (should called)))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-partial-fontification-starts-inside-url ()
+  "Bare URL scanning should broaden from partial fontification regions."
+  (let ((buf (generate-new-buffer " *md-ts-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "First https://one.example and second https://two.example/path.\n")
+          (md-ts-mode)
+          (goto-char (point-min))
+          (search-forward "https://two.example/path")
+          (let ((url-beg (match-beginning 0))
+                (url-end (match-end 0)))
+            (funcall font-lock-fontify-region-function
+                     (+ url-beg 8) (+ url-beg 16) nil)
+            (let ((button (button-at url-beg)))
+              (should button)
+              (should (equal (cons (button-start button)
+                                   (button-end button))
+                             (cons url-beg url-end)))
+              (should (equal (button-get button 'md-ts-link-static-target)
+                             "https://two.example/path"))))
+          (goto-char (point-min))
+          (search-forward "https://one.example")
+          (let ((button (button-at (match-beginning 0))))
+            (should button)
+            (should (equal (button-get button 'md-ts-link-static-target)
+                           "https://one.example"))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-partial-fontification-fontifies-parsed-link-on-line ()
+  "Partial bare URL fontification should fontify parsed links on the line."
+  (let ((buf (generate-new-buffer " *md-ts-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert (concat "See [label](https://parsed.example) and bare "
+                          "https://bare.example/path.\n"))
+          (md-ts-mode)
+          (goto-char (point-min))
+          (search-forward "https://bare.example/path")
+          (let ((bare-beg (match-beginning 0)))
+            (funcall font-lock-fontify-region-function
+                     (+ bare-beg 8) (+ bare-beg 16) nil))
+          (goto-char (point-min))
+          (search-forward "label")
+          (let* ((label-beg (match-beginning 0))
+                 (button (button-at label-beg)))
+            (should button)
+            (should (md-ts--link-button-p button))
+            (should-not (button-get button 'md-ts-link-static-target))
+            (should (equal (get-text-property label-beg 'help-echo)
+                           "https://parsed.example"))
+            (let ((face (get-text-property label-beg 'face)))
+              (should (if (listp face) (memq 'link face)
+                        (eq face 'link)))))
+          (search-forward "https://bare.example/path")
+          (let ((button (button-at (match-beginning 0))))
+            (should button)
+            (should (equal (button-get button 'md-ts-link-static-target)
+                           "https://bare.example/path"))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-partial-fontification-expands-multiline-link ()
+  "Partial bare URL fontification should report multi-line parsed-link writes."
+  (let ((buf (generate-new-buffer " *md-ts-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert (concat "[first\nsecond](https://parsed.example) and "
+                          "https://bare.example/path.\n"))
+          (md-ts-mode)
+          (font-lock-ensure)
+          (funcall font-lock-unfontify-region-function (point-min) (point-max))
+          (goto-char (point-min))
+          (search-forward "https://bare.example/path")
+          (let* ((bare-beg (match-beginning 0))
+                 (result (funcall font-lock-fontify-region-function
+                                  (+ bare-beg 8) (+ bare-beg 16) nil))
+                 (bounds (md-ts-test--jit-lock-bounds result))
+                 (bound-beg (car bounds))
+                 (bound-end (cdr bounds)))
+            (goto-char (point-min))
+            (search-forward "first")
+            (let ((label-beg (match-beginning 0)))
+              (should (<= bound-beg label-beg))
+              (should (< label-beg bound-end))
+              (should (md-ts--link-button-p (button-at label-beg))))
+            (search-forward "second")
+            (should (md-ts--link-button-p (button-at (match-beginning 0))))
+            (should-not
+             (md-ts-test--property-outside-region
+              bound-beg bound-end
+              '(face button category action help-echo mouse-face follow-link
+                     md-ts-link-button md-ts-link-help-echo
+                     md-ts-link-static-target invisible display)))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-edit-destroyed-multiline-link-cleans-stale-button ()
+  "Edits that destroy old multi-line links should return cleanup bounds."
+  (let ((buf (generate-new-buffer " *md-ts-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "[first\nsecond](https://parsed.example)\n")
+          (md-ts-mode)
+          (font-lock-ensure)
+          (goto-char (point-min))
+          (search-forward "second")
+          (let ((second-marker (copy-marker (match-beginning 0))))
+            (should (md-ts--link-button-p (button-at second-marker)))
+            (goto-char (point-min))
+            (delete-char 1)
+            (let* ((second-beg (marker-position second-marker))
+                   (result (funcall font-lock-fontify-region-function
+                                    (point-min) (1+ (point-min)) nil))
+                   (bounds (md-ts-test--jit-lock-bounds result))
+                   (bound-beg (car bounds))
+                   (bound-end (cdr bounds)))
+              (should (<= bound-beg second-beg))
+              (should (< second-beg bound-end))
+              (should-not (md-ts--link-button-p (button-at second-beg)))
+              (should-not
+               (md-ts-test--property-outside-region
+                bound-beg bound-end
+                '(face button category action help-echo mouse-face follow-link
+                       md-ts-link-button md-ts-link-help-echo
+                       md-ts-link-static-target invisible display))))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-line-start-refontification-preserves-later-url ()
+  "Line-wide cleanup should reapply valid bare links outside BEG..END."
+  (let ((buf (md-ts-test--fontify
+              "Start https://one.example and later https://two.example/path.\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (insert "!")
+          (funcall font-lock-fontify-region-function
+                   (point-min) (1+ (point-min)) nil)
+          (goto-char (point-min))
+          (search-forward "https://two.example/path")
+          (let ((button (button-at (match-beginning 0))))
+            (should button)
+            (should (equal (button-get button 'md-ts-link-static-target)
+                           "https://two.example/path"))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-partial-fontification-starts-inside-email ()
+  "Bare email scanning should broaden from partial fontification regions."
+  (let ((buf (generate-new-buffer " *md-ts-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "Email person@example.com please.\n")
+          (md-ts-mode)
+          (goto-char (point-min))
+          (search-forward "person@example.com")
+          (let ((mail-beg (match-beginning 0))
+                (mail-end (match-end 0)))
+            (funcall font-lock-fontify-region-function
+                     (+ mail-beg 3) (+ mail-beg 10) nil)
+            (let ((button (button-at mail-beg)))
+              (should button)
+              (should (equal (cons (button-start button)
+                                   (button-end button))
+                             (cons mail-beg mail-end)))
+              (should (equal (button-get button 'md-ts-link-static-target)
+                             "mailto:person@example.com")))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-fontify-region-returns-line-bounds ()
+  "Bare line scanning should report the physical line it fontified."
+  (let ((buf (generate-new-buffer " *md-ts-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "intro\nVisit https://example.com/path now.\n")
+          (md-ts-mode)
+          (goto-char (point-min))
+          (search-forward "https://example.com/path")
+          (let* ((url-beg (match-beginning 0))
+                 (url-end (match-end 0))
+                 (line-beg (line-beginning-position))
+                 (fontify-end (1+ (line-end-position)))
+                 called
+                 result)
+            (cl-letf (((symbol-function 'treesit-font-lock-fontify-region)
+                       (lambda (tree-beg tree-end &optional _loudly)
+                         (setq called (cons tree-beg tree-end))
+                         `(jit-lock-bounds ,(point-min) . ,url-beg))))
+              (setq result (funcall font-lock-fontify-region-function
+                                    (+ url-beg 8) (+ url-beg 15) nil)))
+            (should (equal called (cons line-beg fontify-end)))
+            (should (equal result `(jit-lock-bounds ,line-beg . ,fontify-end)))
+            (let ((button (button-at url-beg)))
+              (should button)
+              (should (equal (cons (button-start button)
+                                   (button-end button))
+                             (cons url-beg url-end)))
+              (should (equal (button-get button 'md-ts-link-static-target)
+                             "https://example.com/path")))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-fontify-region-does-not-claim-tree-widening ()
+  "The wrapper should not return bounds tree-sitter widened on its own."
+  (let ((buf (generate-new-buffer " *md-ts-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "Visit https://widened.example/path now.\nOriginal region here.\n")
+          (md-ts-mode)
+          (goto-char (point-min))
+          (forward-line 1)
+          (let* ((original-beg (point))
+                 (original-end (+ (point) 8))
+                 (line-beg (line-beginning-position))
+                 (fontify-end (1+ (line-end-position)))
+                 result)
+            (cl-letf (((symbol-function 'treesit-font-lock-fontify-region)
+                       (lambda (_beg _end &optional _loudly)
+                         `(jit-lock-bounds ,(point-min) . ,(point-max)))))
+              (setq result (funcall font-lock-fontify-region-function
+                                    original-beg original-end nil)))
+            (should (equal result `(jit-lock-bounds ,line-beg . ,fontify-end)))
+            (goto-char (point-min))
+            (search-forward "https://widened.example/path")
+            (should-not (button-at (match-beginning 0)))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-fontification-is-silent ()
+  "Bare URL/email fontification should not dirty clean buffers or undo."
+  (dolist (text '("Visit https://example.com/path now.\n"
+                  "Email person@example.com please.\n"))
+    (let ((buf (generate-new-buffer " *md-ts-test*")))
+      (unwind-protect
+          (with-current-buffer buf
+            (insert text)
+            (md-ts-mode)
+            (setq buffer-undo-list nil)
+            (set-buffer-modified-p nil)
+            (font-lock-ensure)
+            (should-not (buffer-modified-p))
+            (should (equal buffer-undo-list nil)))
+        (kill-buffer buf)))))
+
+(ert-deftest md-ts-test-link-bare-fontification-is-silent-in-read-only-buffer ()
+  "Bare link fontification should be silent in read-only buffers too."
+  (let ((buf (generate-new-buffer " *md-ts-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "Visit https://example.com and email person@example.com.\n")
+          (md-ts-mode)
+          (setq buffer-undo-list nil)
+          (set-buffer-modified-p nil)
+          (setq buffer-read-only t)
+          (font-lock-ensure)
+          (should-not (buffer-modified-p))
+          (should (equal buffer-undo-list nil))
+          (goto-char (point-min))
+          (search-forward "https://example.com")
+          (should (button-at (match-beginning 0)))
+          (search-forward "person@example.com")
+          (should (button-at (match-beginning 0))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-read-only-unfontify-and-flush-is-safe ()
+  "Read-only unfontify/flush should remove and restore bare buttons safely."
+  (let ((buf (md-ts-test--fontify
+              "Visit https://example.com and email person@example.com.\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (setq buffer-undo-list nil)
+          (set-buffer-modified-p nil)
+          (setq buffer-read-only t)
+          (should
+           (condition-case nil
+               (progn
+                 (funcall font-lock-unfontify-region-function
+                          (point-min) (point-max))
+                 (font-lock-flush (point-min) (point-max))
+                 (font-lock-ensure)
+                 t)
+             (buffer-read-only nil)))
+          (goto-char (point-min))
+          (search-forward "https://example.com")
+          (should (button-at (match-beginning 0)))
+          (search-forward "person@example.com")
+          (should (button-at (match-beginning 0))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-indirect-fontification-recreates-base-button ()
+  "Fontifying an indirect buffer should not leave base bare buttons deleted."
+  (let ((base (md-ts-test--fontify "Visit https://example.com/path now.\n"))
+        indirect)
+    (unwind-protect
+        (progn
+          (setq indirect (make-indirect-buffer base " *md-ts-indirect*" t))
+          (with-current-buffer indirect
+            (md-ts-mode)
+            (funcall font-lock-unfontify-region-function
+                     (point-min) (point-max))
+            (funcall font-lock-fontify-region-function
+                     (point-min) (point-max) nil))
+          (with-current-buffer base
+            (goto-char (point-min))
+            (search-forward "https://example.com/path")
+            (let ((button (button-at (match-beginning 0))))
+              (should button)
+              (should (md-ts--link-button-p button))
+              (should (equal (button-get button 'md-ts-link-static-target)
+                             "https://example.com/path")))))
+      (when (buffer-live-p indirect)
+        (kill-buffer indirect))
+      (kill-buffer base))))
+
+(ert-deftest md-ts-test-link-bare-indirect-kill-does-not-break-base-fontify ()
+  "Killing an indirect md-ts buffer should not break base fontification."
+  (let ((base (md-ts-test--fontify "Visit https://example.com/path now.\n"))
+        indirect)
+    (unwind-protect
+        (progn
+          (setq indirect (make-indirect-buffer base " *md-ts-indirect*" t))
+          (with-current-buffer indirect
+            (md-ts-mode)
+            (font-lock-ensure))
+          (kill-buffer indirect)
+          (setq indirect nil)
+          (with-current-buffer base
+            (should-not
+             (condition-case err
+                 (progn
+                   (funcall font-lock-fontify-region-function
+                            (point-min) (point-max) nil)
+                   nil)
+               (error err)))
+            (goto-char (point-min))
+            (search-forward "https://example.com/path")
+            (should (md-ts--link-button-p (button-at (match-beginning 0))))))
+      (when (buffer-live-p indirect)
+        (kill-buffer indirect))
+      (kill-buffer base))))
+
+(ert-deftest md-ts-test-link-bare-root-nodes-ignore-bad-parsers ()
+  "Root collection should ignore and delete parser objects that error."
+  (let (deleted)
+    (cl-letf (((symbol-function 'treesit-local-parsers-on)
+               (lambda (&rest _args) '(bad-parser)))
+              ((symbol-function 'md-ts--parser-list)
+               (lambda (&rest _args) nil))
+              ((symbol-function 'treesit-parser-language)
+               (lambda (parser)
+                 (if (eq parser 'bad-parser)
+                     (error "deleted parser")
+                   'markdown)))
+              ((symbol-function 'treesit-parser-delete)
+               (lambda (parser)
+                 (push parser deleted))))
+      (should-not (md-ts--font-lock-root-nodes (point-min) (point-max)
+                                               'markdown))
+      (should (equal deleted '(bad-parser))))))
+
+(ert-deftest md-ts-test-link-bare-indirect-edit-base-cleans-stale-multiline-link ()
+  "Stale multiline bounds recorded in an indirect buffer are shared."
+  (let ((base (md-ts-test--fontify "[first\nsecond](https://parsed.example)\n"))
+        indirect)
+    (unwind-protect
+        (progn
+          (setq indirect (make-indirect-buffer base " *md-ts-indirect*" t))
+          (with-current-buffer indirect
+            (md-ts-mode)
+            (font-lock-ensure)
+            (goto-char (point-min))
+            (delete-char 1))
+          (with-current-buffer base
+            (goto-char (point-min))
+            (search-forward "second")
+            (let ((second-beg (match-beginning 0)))
+              (should (md-ts--link-button-p (button-at second-beg)))
+              (let* ((result (funcall font-lock-fontify-region-function
+                                      (point-min) (1+ (point-min)) nil))
+                     (bounds (md-ts-test--jit-lock-bounds result)))
+                (should (<= (car bounds) second-beg))
+                (should (< second-beg (cdr bounds)))
+                (should-not (md-ts--link-button-p
+                             (button-at second-beg)))))))
+      (when (buffer-live-p indirect)
+        (kill-buffer indirect))
+      (kill-buffer base))))
+
+(ert-deftest md-ts-test-link-bare-side-effect-property-span-starts-at-prop ()
+  "Side-effect span lookup should not expand to point-min at prop starts."
+  (with-temp-buffer
+    (insert "prefix\nlinked text\n")
+    (let ((beg (progn
+                 (goto-char (point-min))
+                 (search-forward "linked")
+                 (match-beginning 0)))
+          (end (match-end 0)))
+      (put-text-property beg end 'md-ts-link-static-target "target")
+      (should (equal (md-ts--font-lock-side-effect-property-span beg)
+                     (cons beg end))))))
+
+(ert-deftest md-ts-test-link-bare-cleanup-preserves-foreign-link-face ()
+  "Bare cleanup should not remove pre-existing foreign `link' faces."
+  (let ((buf (generate-new-buffer " *md-ts-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "Visit https://example.com/path now.\n")
+          (goto-char (point-min))
+          (search-forward "https://example.com/path")
+          (let ((url-beg (match-beginning 0))
+                (url-end (match-end 0)))
+            (add-face-text-property url-beg url-end 'link)
+            (md-ts--make-link-button url-beg url-end
+                                     "https://example.com/path" nil
+                                     "https://example.com/path")
+            (should (button-at url-beg))
+            (should-not (get-text-property url-beg 'md-ts-bare-link-face))
+            (md-ts--remove-bare-link-button-properties url-beg url-end)
+            (should-not (button-at url-beg))
+            (should (md-ts--link-face-value-p
+                     (get-text-property url-beg 'face)))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-narrowed-same-line-multi-url-refontify ()
+  "Narrowed same-line cleanup should reapply all physical-line URLs."
+  (let ((base (md-ts-test--fontify
+               (concat "First https://one.example/path and "
+                       "second https://two.example/path.\n")))
+        indirect one-beg one-end)
+    (unwind-protect
+        (progn
+          (with-current-buffer base
+            (goto-char (point-min))
+            (search-forward "https://one.example/path")
+            (setq one-beg (match-beginning 0)
+                  one-end (match-end 0))
+            (save-restriction
+              (narrow-to-region one-beg one-end)
+              (md-ts--fontify-bare-links
+               (+ one-beg 4) (+ one-beg 12)))
+            (dolist (target '("https://one.example/path"
+                              "https://two.example/path"))
+              (goto-char (point-min))
+              (search-forward target)
+              (let ((button (button-at (match-beginning 0))))
+                (should button)
+                (should (equal (button-get button
+                                           'md-ts-link-static-target)
+                               target)))))
+          (setq indirect (make-indirect-buffer base " *md-ts-indirect*" t))
+          (with-current-buffer indirect
+            (md-ts-mode)
+            (save-restriction
+              (narrow-to-region one-beg one-end)
+              (md-ts--fontify-bare-links
+               (+ one-beg 5) (+ one-beg 13))))
+          (with-current-buffer base
+            (dolist (target '("https://one.example/path"
+                              "https://two.example/path"))
+              (goto-char (point-min))
+              (search-forward target)
+              (let ((button (button-at (match-beginning 0))))
+                (should button)
+                (should (equal (button-get button
+                                           'md-ts-link-static-target)
+                               target))))))
+      (when (buffer-live-p indirect)
+        (kill-buffer indirect))
+      (kill-buffer base))))
+
+(ert-deftest md-ts-test-link-bare-code-span-context-edit-cleans-stale-button ()
+  "Wrapping an existing bare URL in code should remove stale bare props."
+  (let ((buf (md-ts-test--fontify "Visit https://example.com/path now.\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "https://example.com/path")
+          (let ((url-beg (match-beginning 0))
+                (url-end (match-end 0)))
+            (should (button-at url-beg))
+            (goto-char url-end)
+            (insert "`")
+            (goto-char url-beg)
+            (insert "`")
+            ;; Refontify only delimiter context; line-wide bare cleanup should
+            ;; remove the old button even though the URL text is outside BEG..END.
+            (funcall font-lock-fontify-region-function url-beg (1+ url-beg) nil)
+            (search-forward "https://example.com/path")
+            (let ((pos (match-beginning 0)))
+              (should-not (button-at pos))
+              (should-not (get-text-property pos 'md-ts-link-static-target))
+              (should-not (get-text-property pos 'md-ts-link-help-echo)))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-fence-context-edit-cleans-stale-button ()
+  "Moving an existing bare URL into a fence should clear stale bare props."
+  (let ((buf (md-ts-test--fontify "https://example.com/path\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (should (button-at (point)))
+          (insert "```\n")
+          (goto-char (point-max))
+          (insert "```\n")
+          (font-lock-ensure)
+          (goto-char (point-min))
+          (search-forward "https://example.com/path")
+          (let ((pos (match-beginning 0)))
+            (should-not (button-at pos))
+            (should-not (get-text-property pos 'md-ts-link-static-target))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-edit-to-autolink-clears-static-target ()
+  "Editing a bare URL into an autolink should keep a parsed button."
+  (let ((url "https://example.com/path")
+        (buf (md-ts-test--fontify "Visit https://example.com/path now.\n"))
+        opened)
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward url)
+          (let ((url-beg (match-beginning 0))
+                (url-end (match-end 0)))
+            (should (button-at url-beg))
+            (should (get-text-property url-beg
+                                       'md-ts-link-static-target))
+            (goto-char url-end)
+            (insert ">")
+            (goto-char url-beg)
+            (insert "<")
+            (font-lock-flush)
+            (font-lock-ensure)
+            (goto-char (point-min))
+            (search-forward url)
+            (let* ((pos (match-beginning 0))
+                   (button (button-at pos)))
+              (should button)
+              (should (md-ts--link-button-p button))
+              (should-not (button-get button
+                                      'md-ts-link-static-target))
+              (should-not (get-text-property pos
+                                             'md-ts-link-static-target))
+              (should (equal (cons (button-start button)
+                                   (button-end button))
+                             (cons pos (match-end 0))))
+              (cl-letf (((symbol-function 'browse-url)
+                         (lambda (target &rest _args)
+                           (setq opened target))))
+                (push-button pos))
+              (should (equal opened url)))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-direct-push-falls-back-to-parsed-autolink ()
+  "Stale bare buttons should resolve parsed autolinks without refontifying."
+  (let ((url "https://example.com/path")
+        (buf (md-ts-test--fontify "Visit https://example.com/path now.\n"))
+        opened)
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward url)
+          (let ((url-beg (match-beginning 0))
+                (url-end (match-end 0)))
+            (should (button-at url-beg))
+            (should (get-text-property url-beg 'md-ts-link-static-target))
+            (goto-char url-end)
+            (insert ">")
+            (goto-char url-beg)
+            (insert "<")
+            ;; No font-lock flush/ensure: exercise direct stale-button
+            ;; activation across the bare -> parsed transition.
+            (goto-char (point-min))
+            (search-forward url)
+            (let* ((pos (match-beginning 0))
+                   (button (button-at pos)))
+              (should button)
+              (should (button-get button 'md-ts-link-static-target))
+              (cl-letf (((symbol-function 'browse-url)
+                         (lambda (target &rest _args)
+                           (setq opened target))))
+                (push-button pos))
+              (should (equal opened url)))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-direct-push-falls-back-to-bare-url ()
+  "Stale parsed autolink buttons should resolve bare URLs without refontifying."
+  (let ((url "https://example.com/path")
+        (buf (md-ts-test--fontify "Visit <https://example.com/path> now.\n"))
+        opened)
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward url)
+          (let ((url-beg (match-beginning 0))
+                (url-end (match-end 0)))
+            (should (button-at url-beg))
+            (should-not (get-text-property url-beg 'md-ts-link-static-target))
+            (goto-char url-end)
+            (delete-char 1)
+            (goto-char (1- url-beg))
+            (delete-char 1)
+            ;; No font-lock flush/ensure: exercise direct stale-button
+            ;; activation across the parsed -> bare transition.
+            (goto-char (point-min))
+            (search-forward url)
+            (let* ((pos (match-beginning 0))
+                   (button (button-at pos)))
+              (should button)
+              (should-not (button-get button 'md-ts-link-static-target))
+              (cl-letf (((symbol-function 'browse-url)
+                         (lambda (target &rest _args)
+                           (setq opened target))))
+                (push-button pos))
+              (should (equal opened url)))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-uppercase-url-with-case-fold-search-nil ()
+  "Uppercase bare URL schemes should buttonize when search is case-sensitive."
+  (let ((case-fold-search nil)
+        (buf nil)
+        opened)
+    (unwind-protect
+        (progn
+          (setq buf (md-ts-test--fontify "Visit HTTPS://EXAMPLE.COM/Path now.\n"))
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (search-forward "HTTPS://EXAMPLE.COM/Path")
+            (let ((pos (match-beginning 0))
+                  (end (match-end 0)))
+              (let ((button (button-at pos)))
+                (should button)
+                (should (equal (cons (button-start button)
+                                     (button-end button))
+                               (cons pos end)))
+                (should (equal (button-get button 'md-ts-link-static-target)
+                               "HTTPS://EXAMPLE.COM/Path")))
+              (cl-letf (((symbol-function 'browse-url)
+                         (lambda (url &rest _args)
+                           (setq opened url))))
+                (push-button pos))
+              (should (equal opened "HTTPS://EXAMPLE.COM/Path")))))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
+(ert-deftest md-ts-test-link-bare-static-activation-recomputes-edited-url ()
+  "Activating a stale bare button should open the current URL text."
+  (let ((buf (md-ts-test--fontify "Visit https://example.com/old now.\n"))
+        opened)
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "old")
+          (insert "-new")
+          (goto-char (point-min))
+          (search-forward "https://example.com/old-new")
+          (let ((pos (match-beginning 0)))
+            (should (equal (get-text-property pos 'help-echo)
+                           "https://example.com/old"))
+            (cl-letf (((symbol-function 'browse-url)
+                       (lambda (url &rest _args)
+                         (setq opened url))))
+              (push-button pos)))
+          (should (equal opened "https://example.com/old-new")))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-uppercase-static-activation-recomputes-with-case-fold-search-nil ()
+  "Uppercase stale bare URLs should revalidate when search is case-sensitive."
+  (let ((case-fold-search nil)
+        (buf nil)
+        opened)
+    (unwind-protect
+        (progn
+          (setq buf (md-ts-test--fontify "Visit HTTPS://EXAMPLE.COM/old now.\n"))
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (search-forward "old")
+            (insert "-NEW")
+            (goto-char (point-min))
+            (search-forward "HTTPS://EXAMPLE.COM/old-NEW")
+            (cl-letf (((symbol-function 'browse-url)
+                       (lambda (url &rest _args)
+                         (setq opened url))))
+              (push-button (match-beginning 0)))
+            (should (equal opened "HTTPS://EXAMPLE.COM/old-NEW"))))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
+(ert-deftest md-ts-test-link-bare-static-activation-rejects-broken-url ()
+  "Activating a stale bare button should not open an old broken URL."
+  (let ((buf (md-ts-test--fontify "Visit https://example.com/old now.\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "https")
+          (goto-char (+ (match-beginning 0) 2))
+          (insert " ")
+          (goto-char (point-min))
+          (search-forward "ht tps://example.com/old")
+          (cl-letf (((symbol-function 'browse-url)
+                     (lambda (&rest _args)
+                       (ert-fail "browse-url called for broken stale URL"))))
+            (should-error (push-button (match-beginning 0))
+                          :type 'user-error)))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-long-line-smoke ()
+  "Bare scanner should handle long prose lines with many misses and URLs."
+  (let* ((chunks (append (make-list 120 "not.a/link@example")
+                         (cl-loop for i below 12
+                                  collect (format "https://example.com/%d" i))))
+         (text (concat (mapconcat #'identity chunks " ") "\n"))
+         (buf (md-ts-test--fontify text)))
+    (unwind-protect
+        (with-current-buffer buf
+          (let ((count 0)
+                (pos (point-min)))
+            (while (< pos (point-max))
+              (when (get-text-property pos 'md-ts-link-static-target)
+                (setq count (1+ count))
+                (setq pos (or (next-single-property-change
+                               pos 'md-ts-link-static-target nil (point-max))
+                              (point-max))))
+              (setq pos (1+ pos)))
+            (should (= count 12))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-caches-reference-definition-ranges ()
+  "Bare scanner should query reference definitions once per pass."
+  (let* ((chunks (cl-loop for i below 20
+                          collect (format "https://example.com/%d" i)))
+         (text (concat (mapconcat #'identity chunks " ") "\n"))
+         (buf (generate-new-buffer " *md-ts-test*"))
+         (calls 0)
+         (original (symbol-function
+                    'md-ts--link-reference-definition-ranges)))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert text)
+          (md-ts-mode)
+          (cl-letf (((symbol-function
+                      'md-ts--link-reference-definition-ranges)
+                     (lambda (&rest args)
+                       (setq calls (1+ calls))
+                       (apply original args))))
+            (funcall font-lock-fontify-region-function
+                     (point-min) (point-max) nil))
+          (should (= calls 1)))
+      (kill-buffer buf))))
+
 (ert-deftest md-ts-test-link-open-at-point-command ()
   "`md-ts-open-link-at-point' should activate a buttonized link at point."
   (let (opened)
@@ -2365,9 +3570,11 @@ inline parser ranges cause the first range's faces to be dropped."
 
 (ert-deftest md-ts-test-link-open-at-point-missing-link ()
   "`md-ts-open-link-at-point' should clearly reject ordinary text."
-  (should-error
-   (md-ts-test--open-link-at-search "No links here.\n" "links")
-   :type 'user-error))
+  (let ((err (should-error
+              (md-ts-test--open-link-at-search "No links here.\n" "links")
+              :type 'user-error)))
+    (should (equal (error-message-string err)
+                   "No Markdown or bare link at point"))))
 
 (ert-deftest md-ts-test-link-target-at-point-rejects-adjacent-prose ()
   "Adjacent prose should not inherit neighboring parsed link targets."
@@ -2415,6 +3622,62 @@ inline parser ranges cause the first range's faces to be dropped."
           (should (button-at (point)))
           (should-error (md-ts-open-link-at-point) :type 'user-error)
           (should-not called))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-open-at-point-bare-under-foreign-text-button ()
+  "Foreign text buttons should not hide bare-link fallback opening."
+  (let ((buf (generate-new-buffer " *md-ts-test*"))
+        called
+        opened)
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "Visit https://example.com/path now.\n")
+          (md-ts-mode)
+          (goto-char (point-min))
+          (search-forward "https://example.com/path")
+          (let ((pos (match-beginning 0)))
+            (make-text-button pos (match-end 0)
+                              'action (lambda (_button)
+                                        (setq called t))
+                              'help-echo "foreign")
+            (font-lock-ensure)
+            (goto-char pos)
+            (should (button-at (point)))
+            (should-not (md-ts--link-button-p (button-at (point))))
+            (cl-letf (((symbol-function 'browse-url)
+                       (lambda (url &rest _args)
+                         (setq opened url))))
+              (md-ts-open-link-at-point))
+            (should (equal opened "https://example.com/path"))
+            (should-not called)))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-open-at-point-bare-under-foreign-overlay-button ()
+  "Foreign overlay buttons should not hide bare-link fallback opening."
+  (let ((buf (generate-new-buffer " *md-ts-test*"))
+        called
+        opened)
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "Visit https://example.com/path now.\n")
+          (md-ts-mode)
+          (goto-char (point-min))
+          (search-forward "https://example.com/path")
+          (let* ((pos (match-beginning 0))
+                 (overlay (make-button pos (match-end 0)
+                                       'action (lambda (_button)
+                                                 (setq called t))
+                                       'help-echo "overlay")))
+            (font-lock-ensure)
+            (goto-char pos)
+            (should (eq (button-at (point)) overlay))
+            (should-not (md-ts--link-button-p overlay))
+            (cl-letf (((symbol-function 'browse-url)
+                       (lambda (url &rest _args)
+                         (setq opened url))))
+              (md-ts-open-link-at-point))
+            (should (equal opened "https://example.com/path"))
+            (should-not called)))
       (kill-buffer buf))))
 
 (ert-deftest md-ts-test-link-open-at-point-rejects-foreign-button-before-link ()
@@ -2744,6 +4007,104 @@ When code is syntax-highlighted, the language label is redundant."
                  "```python\nprint('hi')\n```\n"
                  "```")
                 'md-ts--markup))))
+
+(ert-deftest md-ts-test-hide-markup-fenced-code-partial-expands-bounds ()
+  "Partial hide-markup fontification should report full fence-line writes."
+  (let ((md-ts-hide-markup t)
+        (buf (generate-new-buffer " *md-ts-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "Before\n```\ncode line\n```\nAfter\n")
+          (md-ts-mode)
+          (font-lock-ensure)
+          (funcall font-lock-unfontify-region-function (point-min) (point-max))
+          (goto-char (point-min))
+          (search-forward "code")
+          (let* ((result (funcall font-lock-fontify-region-function
+                                  (match-beginning 0) (match-end 0) nil))
+                 (bounds (md-ts-test--jit-lock-bounds result))
+                 (bound-beg (car bounds))
+                 (bound-end (cdr bounds)))
+            (goto-char (point-min))
+            (search-forward "```")
+            (let ((open-beg (match-beginning 0)))
+              (should (<= bound-beg open-beg))
+              (should (< open-beg bound-end))
+              (should (eq (get-text-property open-beg 'invisible)
+                          'md-ts--markup)))
+            (search-forward "```")
+            (let ((close-beg (match-beginning 0)))
+              (should (<= bound-beg close-beg))
+              (should (< close-beg bound-end))
+              (should (eq (get-text-property close-beg 'invisible)
+                          'md-ts--markup)))
+            (should-not
+             (md-ts-test--property-outside-region
+              bound-beg bound-end
+              '(face button category action help-echo mouse-face follow-link
+                     md-ts-link-button md-ts-link-help-echo
+                     md-ts-link-static-target invisible display)))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-hide-markup-fenced-code-opening-edit-cleans-old-close ()
+  "Edits to an old opening fence should return bounds covering stale markup."
+  (let ((md-ts-hide-markup t)
+        (buf (generate-new-buffer " *md-ts-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "Before\n```\ncode line\n```\nAfter\n")
+          (md-ts-mode)
+          (font-lock-ensure)
+          (goto-char (point-min))
+          (search-forward "```" nil nil 2)
+          (let ((close-marker (copy-marker (match-beginning 0))))
+            (should (eq (get-text-property close-marker 'invisible)
+                        'md-ts--markup))
+            (goto-char (point-min))
+            (search-forward "```")
+            (let ((open-beg (match-beginning 0))
+                  (open-end (match-end 0)))
+              (goto-char open-beg)
+              (insert "`")
+              (let* ((close-beg (marker-position close-marker))
+                     (result (funcall font-lock-fontify-region-function
+                                      open-beg (1+ open-end) nil))
+                     (bounds (md-ts-test--jit-lock-bounds result))
+                     (bound-beg (car bounds))
+                     (bound-end (cdr bounds)))
+                (should (<= bound-beg close-beg))
+                (should (< close-beg bound-end))
+                (should-not (get-text-property close-beg 'invisible))
+                (should-not
+                 (md-ts-test--property-outside-region
+                  bound-beg bound-end
+                  '(face button category action help-echo mouse-face follow-link
+                         md-ts-link-button md-ts-link-help-echo
+                         md-ts-link-static-target invisible display)))))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-hide-markup-fenced-code-hide-off-does-not-expand ()
+  "Ordinary fenced-code edits should not expand to whole blocks by default."
+  (let ((md-ts-hide-markup nil)
+        (buf (generate-new-buffer " *md-ts-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert (concat "Before\n```\n"
+                          (mapconcat (lambda (n) (format "code %d" n))
+                                     (number-sequence 1 40) "\n")
+                          "\n```\nAfter\n"))
+          (md-ts-mode)
+          (font-lock-ensure)
+          (goto-char (point-min))
+          (search-forward "code 20")
+          (let* ((edit-beg (match-beginning 0))
+                 (edit-end (match-end 0))
+                 (line-beg (line-beginning-position))
+                 (line-end (1+ (line-end-position)))
+                 (result (funcall font-lock-fontify-region-function
+                                  edit-beg edit-end nil)))
+            (should (equal result `(jit-lock-bounds ,line-beg . ,line-end)))))
+      (kill-buffer buf))))
 
 (ert-deftest md-ts-test-hide-markup-fenced-code-no-phantom-lines ()
   "With hide-markup, newlines after fence lines are also hidden.
