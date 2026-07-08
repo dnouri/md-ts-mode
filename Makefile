@@ -3,8 +3,9 @@ BATCH = $(EMACS) --batch -Q -L .
 
 SELECTOR ?=
 VERBOSE ?=
+PERF_ITERATIONS ?= 3
 
-.PHONY: test compile lint lint-checkdoc lint-package check check-parens clean help install-hooks snapshot
+.PHONY: test compile lint lint-checkdoc lint-package check check-parens clean help install-hooks snapshot perf
 
 help:
 	@echo "Targets:"
@@ -15,6 +16,7 @@ help:
 	@echo "  make lint-package   MELPA package conventions only"
 	@echo "  make check-parens   Verify balanced parentheses"
 	@echo "  make snapshot       Regenerate test/fixture-faces.eld"
+	@echo "  make perf           Run advisory link fontification benchmarks"
 	@echo "  make check          compile + lint + test (pre-commit)"
 	@echo "  make install-hooks  Set up git pre-commit hook"
 	@echo "  make clean          Remove .elc files"
@@ -89,6 +91,12 @@ snapshot:
 		-L test \
 		-l md-ts-mode-test \
 		-l scripts/generate-snapshot.el
+
+perf:
+	@echo "=== Perf (advisory) ==="
+	@PERF_ITERATIONS=$(PERF_ITERATIONS) \
+		$(BATCH) \
+		-l scripts/benchmark-document-links.el
 
 check: compile lint test
 
