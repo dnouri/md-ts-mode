@@ -267,43 +267,44 @@
 (defun md-ts-bench-run ()
   "Run advisory document-link fontification benchmarks."
   (md-ts-bench--emit-environment)
-  (unless (md-ts-bench--required-grammars-ready-p)
+  (if (md-ts-bench--required-grammars-ready-p)
+      (progn
+        ;; Global warmup keeps first-use parser setup outliers from dominating the
+        ;; first reported case without adding an extra expensive run per fixture.
+        (md-ts-bench--fontify-text
+         "# Warmup\n\nText [x](https://example.com) https://example.org user@example.org\n")
+        (let ((cases `(("bare-links-100" mode+font-lock
+                        ,(md-ts-bench--bare-links-doc 100) 100 "lines")
+                       ("bare-links-400" mode+font-lock
+                        ,(md-ts-bench--bare-links-doc 400) 400 "lines")
+                       ("bare-links-800" mode+font-lock
+                        ,(md-ts-bench--bare-links-doc 800) 800 "lines")
+                       ("long-line-one-char-jit" jit-one-char
+                        ,(md-ts-bench--long-line-doc 300) 300 "link-groups")
+                       ("parsed-refs-400" mode+font-lock
+                        ,(md-ts-bench--parsed-references-doc 400) 400 "references")
+                       ("parsed-refs-800" mode+font-lock
+                        ,(md-ts-bench--parsed-references-doc 800) 800 "references")
+                       ("mixed-chat-prose" mode+font-lock
+                        ,(md-ts-bench--mixed-chat-prose-doc 100) 100 "threads"))))
+          (dolist (case cases)
+            (pcase-let ((`(,name ,op ,text ,items ,item-unit) case))
+              (md-ts-bench--log "CASE name=%s op=%s items=%d item_unit=%s lines=%d chars=%d"
+                                name op items item-unit
+                                (md-ts-bench--line-count text) (length text))
+              (let ((times (pcase op
+                             ('mode+font-lock
+                              (md-ts-bench--measure
+                               md-ts-bench-iterations
+                               (lambda () (md-ts-bench--fontify-text text))))
+                             ('jit-one-char
+                              (md-ts-bench--measure-jit-one-char
+                               md-ts-bench-iterations text)))))
+                (md-ts-bench--emit-result name op text items item-unit times)))))
+        (md-ts-bench--log "DONE commit=%s"
+                          (md-ts-bench--git-output "rev-parse" "--short" "HEAD")))
     (md-ts-bench--log
-     "SKIP reason=missing-markdown-tree-sitter-grammar hint=set-MD_TS_TREE_SITTER_DIR-or-install-grammars")
-    (cl-return-from md-ts-bench-run nil))
-  ;; Global warmup keeps first-use parser setup outliers from dominating the
-  ;; first reported case without adding an extra expensive run per fixture.
-  (md-ts-bench--fontify-text
-   "# Warmup\n\nText [x](https://example.com) https://example.org user@example.org\n")
-  (let ((cases `(("bare-links-100" mode+font-lock
-                  ,(md-ts-bench--bare-links-doc 100) 100 "lines")
-                 ("bare-links-400" mode+font-lock
-                  ,(md-ts-bench--bare-links-doc 400) 400 "lines")
-                 ("bare-links-800" mode+font-lock
-                  ,(md-ts-bench--bare-links-doc 800) 800 "lines")
-                 ("long-line-one-char-jit" jit-one-char
-                  ,(md-ts-bench--long-line-doc 300) 300 "link-groups")
-                 ("parsed-refs-400" mode+font-lock
-                  ,(md-ts-bench--parsed-references-doc 400) 400 "references")
-                 ("parsed-refs-800" mode+font-lock
-                  ,(md-ts-bench--parsed-references-doc 800) 800 "references")
-                 ("mixed-chat-prose" mode+font-lock
-                  ,(md-ts-bench--mixed-chat-prose-doc 100) 100 "threads"))))
-    (dolist (case cases)
-      (pcase-let ((`(,name ,op ,text ,items ,item-unit) case))
-        (md-ts-bench--log "CASE name=%s op=%s items=%d item_unit=%s lines=%d chars=%d"
-                          name op items item-unit
-                          (md-ts-bench--line-count text) (length text))
-        (let ((times (pcase op
-                       ('mode+font-lock
-                        (md-ts-bench--measure
-                         md-ts-bench-iterations
-                         (lambda () (md-ts-bench--fontify-text text))))
-                       ('jit-one-char
-                        (md-ts-bench--measure-jit-one-char
-                         md-ts-bench-iterations text)))))
-          (md-ts-bench--emit-result name op text items item-unit times)))))
-  (md-ts-bench--log "DONE commit=%s" (md-ts-bench--git-output "rev-parse" "--short" "HEAD")))
+     "SKIP reason=missing-markdown-tree-sitter-grammar hint=set-MD_TS_TREE_SITTER_DIR-or-install-grammars")))
 
 (md-ts-bench-run)
 

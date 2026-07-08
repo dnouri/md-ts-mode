@@ -1034,20 +1034,22 @@ schemes, and `find-file' for local or relative paths.  For local
 paths with a #fragment, open only the file part; fragment
 navigation is deferred.  Fragment-only and empty destinations are
 not supported yet."
-  (let ((case-fold-search t))
+  (let* ((case-fold-search t)
+         (fragment-start (md-ts--local-link-fragment-start url))
+         (plain-url (substring-no-properties url)))
     (cond
      ((string-empty-p url)
       (user-error "Empty link destinations are not supported"))
-     ((eq (md-ts--local-link-fragment-start url) 0)
+     ((eq fragment-start 0)
       (user-error "Same-buffer fragment links are not supported yet"))
      ((string-match-p "\\`mailto:" url)
-      (url-mailto (url-generic-parse-url url)))
+      (url-mailto (url-generic-parse-url plain-url)))
      ((md-ts--windows-drive-path-p url)
-      (find-file (md-ts--local-link-file url)))
+      (find-file (substring-no-properties url 0 fragment-start)))
      ((md-ts--uri-scheme-p url)
-      (browse-url url))
+      (browse-url plain-url))
      (t
-      (find-file (md-ts--local-link-file url))))))
+      (find-file (substring-no-properties url 0 fragment-start))))))
 
 (defun md-ts--make-link-button (beg end url &optional _dynamic static-target)
   "Make the text from BEG to END open URL as a standard button.

@@ -997,7 +997,22 @@ inline parser ranges cause the first range's faces to be dropped."
                (lambda (&rest _args)
                  (ert-fail "browse-url called for escaped local hash"))))
       (md-ts-test--push-button-at-search text "notes"))
-    (should (equal opened "docs/a#b.md"))))
+    (should (equal-including-properties opened "docs/a#b.md"))))
+
+(ert-deftest md-ts-test-link-inline-escaped-hash-before-fragment-opens-file-only ()
+  "Escaped hashes stay literal before an unescaped local fragment."
+  (let ((text "Open [notes](docs/a\\#b.md#intro) please.\n")
+        opened)
+    (should (equal (md-ts-test--help-echo-at-search text "notes")
+                   "docs/a#b.md#intro"))
+    (cl-letf (((symbol-function 'find-file)
+               (lambda (file &rest _args)
+                 (setq opened file)))
+              ((symbol-function 'browse-url)
+               (lambda (&rest _args)
+                 (ert-fail "browse-url called for escaped local hash fragment"))))
+      (md-ts-test--push-button-at-search text "notes"))
+    (should (equal-including-properties opened "docs/a#b.md"))))
 
 (ert-deftest md-ts-test-link-inline-windows-drive-paths-use-find-file ()
   "Windows drive paths should be opened as files, not URI schemes."
@@ -1371,7 +1386,7 @@ inline parser ranges cause the first range's faces to be dropped."
                (lambda (&rest _args)
                  (ert-fail "browse-url called for escaped local hash"))))
       (md-ts-test--push-button-at-search text "Doc"))
-    (should (equal opened "docs/a#b.md"))))
+    (should (equal-including-properties opened "docs/a#b.md"))))
 
 (ert-deftest md-ts-test-link-reference-label-normalization ()
   "Reference labels should be whitespace-folded and simply downcased."
