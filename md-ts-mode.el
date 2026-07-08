@@ -2097,6 +2097,20 @@ left intact."
 (defconst md-ts--bare-link-terminal-punctuation '(?. ?, ?\; ?\: ?\! ?\?)
   "Prose punctuation trimmed from the end of bare link matches.")
 
+(defconst md-ts--bare-mailto-uri-regexp
+  (let ((uri-char "[^]\t\n \\\"'<>[^`{}]"))
+    (concat "\\<mailto:"
+            "\\(?:"
+            ;; Non-empty recipient list containing at least one `@', with
+            ;; pragmatic URI characters so percent-escapes and query text are
+            ;; preserved as part of the explicit mailto URI.
+            "\\(?:" uri-char "*@" uri-char "+\\)"
+            "\\|"
+            ;; RFC-valid empty-recipient form with a query.
+            "\\?" uri-char "+"
+            "\\)"))
+  "Regexp matching a bare mailto URI with optional recipients and query.")
+
 (defconst md-ts--bare-link-closing-delimiters
   '((?\) . ?\() (?\] . ?\[) (?\} . ?\{) (?> . ?<))
   "Closing delimiters trimmed from bare links when unmatched.")
@@ -2159,27 +2173,110 @@ URL paths, are preserved."
       (md-ts--add-link-face-to-region beg end)
       (md-ts--make-link-button beg end target nil target))))
 
+(defun md-ts--bare-link-candidate-valid-p (beg end target &optional check-overlap)
+  "Return non-nil when BEG..END is a valid bare-link candidate.
+TARGET is the candidate activation target.  When CHECK-OVERLAP is
+non-nil, reject candidates that overlap an existing button."
+  (and (< beg end)
+       (not (string-empty-p target))
+       (not (and check-overlap
+                 (md-ts--button-overlaps-region-p beg end)))
+       (not (md-ts--bare-link-unsafe-context-p beg end))))
+
 (defun md-ts--fontify-bare-links-with-regexp
-    (regexp scan-beg scan-end apply-beg apply-end target-function)
+    (regexp scan-beg scan-end apply-beg apply-end target-function
+            &optional skip-function)
   "Fontify bare links matching REGEXP between SCAN-BEG and SCAN-END.
 Only matches intersecting APPLY-BEG to APPLY-END are applied.
 TARGET-FUNCTION is called with normalized match text and returns
-the static activation target.  URL matching is intentionally
-case-insensitive so uppercase schemes are recognized even when
-`case-fold-search' is nil."
+the static activation target.  Optional SKIP-FUNCTION is called
+with normalized match bounds and text; non-nil means skip the
+match.  URL matching is intentionally case-insensitive so
+uppercase schemes are recognized even when `case-fold-search' is
+nil."
   (goto-char scan-beg)
   (while (re-search-forward regexp scan-end t)
     (pcase-let* ((`(,match-beg ,match-end ,text)
                   (md-ts--bare-link-normalized-match
                    (match-beginning 0) (match-end 0)))
                  (target (funcall target-function text)))
-      (unless (or (<= match-end match-beg)
-                  (not (md-ts--regions-intersect-p
+      (unless (or (not (md-ts--regions-intersect-p
                         match-beg match-end apply-beg apply-end))
-                  (string-empty-p target)
-                  (md-ts--button-overlaps-region-p match-beg match-end)
-                  (md-ts--bare-link-unsafe-context-p match-beg match-end))
+                  (and skip-function
+                       (funcall skip-function match-beg match-end text))
+                  (not (md-ts--bare-link-candidate-valid-p
+                        match-beg match-end target t)))
         (md-ts--fontify-bare-link match-beg match-end target)))))
+
+(defun md-ts--bare-link-generic-url-ranges
+    (scan-beg scan-end &optional check-overlap)
+  "Return valid generic bare URL ranges between SCAN-BEG and SCAN-END.
+Each returned vector element has the form [BEG END PREFIX-MAX-END].
+When CHECK-OVERLAP is non-nil, reject candidates overlapping an
+existing button.  The prefix maximum lets mailto containment checks
+avoid rescanning `goto-address-url-regexp' for every explicit
+mailto candidate."
+  (let (ranges
+        (prefix-max-end 0))
+    (save-excursion
+      (save-match-data
+        (goto-char scan-beg)
+        (while (re-search-forward goto-address-url-regexp scan-end t)
+          (pcase-let ((`(,url-beg ,url-end ,text)
+                       (md-ts--bare-link-normalized-match
+                        (match-beginning 0) (match-end 0))))
+            (when (md-ts--bare-link-candidate-valid-p
+                   url-beg url-end text check-overlap)
+              (setq prefix-max-end (max prefix-max-end url-end))
+              (push (vector url-beg url-end prefix-max-end) ranges))))))
+    (vconcat (nreverse ranges))))
+
+(defun md-ts--bare-link-generic-url-range-cache
+    (scan-beg scan-end &optional check-overlap)
+  "Return a function that lazily caches generic URL ranges.
+The returned nullary function collects ranges between SCAN-BEG and
+SCAN-END at most once.  CHECK-OVERLAP has the same meaning as in
+`md-ts--bare-link-generic-url-ranges'."
+  (let (ranges)
+    (lambda ()
+      (or ranges
+          (setq ranges
+                (md-ts--bare-link-generic-url-ranges
+                 scan-beg scan-end check-overlap))))))
+
+(defun md-ts--bare-link-covered-by-earlier-url-p (beg end url-ranges)
+  "Return non-nil when an earlier bare URL in URL-RANGES covers BEG..END.
+URL-RANGES should be the vector returned by
+`md-ts--bare-link-generic-url-ranges'.  This lets an outer generic
+URL own embedded explicit `mailto:' text, while a standalone explicit
+mailto URI can own URL-like text inside its query."
+  (let ((lo 0)
+        (hi (length url-ranges))
+        prior-index)
+    (while (< lo hi)
+      (let* ((mid (+ lo (/ (- hi lo) 2)))
+             (range (aref url-ranges mid)))
+        (if (< (aref range 0) beg)
+            (setq prior-index mid
+                  lo (1+ mid))
+          (setq hi mid))))
+    (and prior-index
+         (<= end (aref (aref url-ranges prior-index) 2)))))
+
+(defun md-ts--bare-mailto-uri-embedded-in-scheme-token-p (beg)
+  "Return non-nil when a mailto match at BEG is inside a scheme-like token."
+  (let ((char (char-before beg)))
+    (and char
+         (or (and (<= ?a char) (<= char ?z))
+             (and (<= ?A char) (<= char ?Z))
+             (and (<= ?0 char) (<= char ?9))
+             (memq char '(?+ ?- ?.))))))
+
+(defun md-ts--bare-mailto-uri-skip-p (beg end url-ranges)
+  "Return non-nil when explicit mailto match BEG..END should be skipped.
+URL-RANGES are cached generic URL ranges used to detect outer bare URLs."
+  (or (md-ts--bare-mailto-uri-embedded-in-scheme-token-p beg)
+      (md-ts--bare-link-covered-by-earlier-url-p beg end url-ranges)))
 
 (defun md-ts--fontify-bare-links (beg end)
   "Fontify bare URLs and email addresses on lines covering BEG to END."
@@ -2191,10 +2288,23 @@ case-insensitive so uppercase schemes are recognized even when
           (md-ts--remove-bare-link-button-properties scan-beg scan-end)
           (save-excursion
             (save-match-data
-              (let ((case-fold-search t)
-                    (md-ts--bare-link-reference-definition-ranges
-                     (md-ts--link-reference-definition-ranges
-                      scan-beg scan-end)))
+              (let* ((case-fold-search t)
+                     (md-ts--bare-link-reference-definition-ranges
+                      (md-ts--link-reference-definition-ranges
+                       scan-beg scan-end))
+                     (generic-url-ranges-cache
+                      (md-ts--bare-link-generic-url-range-cache
+                       scan-beg scan-end t)))
+                ;; Scan explicit mailto before generic URLs so a standalone
+                ;; mailto owns URL-like query text.  Skip it when a cached
+                ;; earlier generic URL covers it, so outer URLs own embedded
+                ;; mailto without rescanning the line for every mailto.
+                (md-ts--fontify-bare-links-with-regexp
+                 md-ts--bare-mailto-uri-regexp
+                 scan-beg scan-end scan-beg scan-end #'identity
+                 (lambda (match-beg match-end _text)
+                   (md-ts--bare-mailto-uri-skip-p
+                    match-beg match-end (funcall generic-url-ranges-cache))))
                 (md-ts--fontify-bare-links-with-regexp
                  goto-address-url-regexp
                  scan-beg scan-end scan-beg scan-end #'identity)
@@ -2487,10 +2597,12 @@ parsed markup belonging to a link."
                      pos 'markdown)))))
 
 (defun md-ts--bare-link-target-at-point-with-regexp
-    (pos regexp line-beg line-end target-function)
+    (pos regexp line-beg line-end target-function &optional skip-function)
   "Return bare-link target at POS matching REGEXP, or nil.
 LINE-BEG and LINE-END bound the scan.  TARGET-FUNCTION maps the
-normalized match text to an opener target."
+normalized match text to an opener target.  Optional SKIP-FUNCTION
+receives normalized match bounds and text; non-nil means skip the
+match."
   (save-excursion
     (goto-char line-beg)
     (catch 'target
@@ -2501,9 +2613,11 @@ normalized match text to an opener target."
                      (target (funcall target-function text)))
           (when (and (<= match-beg pos)
                      (< pos match-end)
-                     (not (string-empty-p target))
-                     (not (md-ts--bare-link-unsafe-context-p
-                           match-beg match-end)))
+                     (not (and skip-function
+                               (funcall skip-function
+                                        match-beg match-end text)))
+                     (md-ts--bare-link-candidate-valid-p
+                      match-beg match-end target))
             (throw 'target target)))))))
 
 (defun md-ts--bare-link-target-at-point (&optional pos)
@@ -2515,11 +2629,22 @@ trusting possibly stale static button properties."
       (save-restriction
         (widen)
         (save-match-data
-          (let ((case-fold-search t)
-                (md-ts--bare-link-reference-definition-ranges
-                 (md-ts--link-reference-definition-ranges
-                  line-beg line-end)))
+          (let* ((case-fold-search t)
+                 (md-ts--bare-link-reference-definition-ranges
+                  (md-ts--link-reference-definition-ranges
+                   line-beg line-end))
+                 (generic-url-ranges-cache
+                  (md-ts--bare-link-generic-url-range-cache
+                   line-beg line-end)))
+            ;; Match fontification precedence: standalone mailto owns query
+            ;; text, but an outer URL wins over embedded mailto/email-looking
+            ;; text in its path or query.
             (or (md-ts--bare-link-target-at-point-with-regexp
+                 pos md-ts--bare-mailto-uri-regexp line-beg line-end #'identity
+                 (lambda (match-beg match-end _text)
+                   (md-ts--bare-mailto-uri-skip-p
+                    match-beg match-end (funcall generic-url-ranges-cache))))
+                (md-ts--bare-link-target-at-point-with-regexp
                  pos goto-address-url-regexp line-beg line-end #'identity)
                 (md-ts--bare-link-target-at-point-with-regexp
                  pos goto-address-mail-regexp line-beg line-end
