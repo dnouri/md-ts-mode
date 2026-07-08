@@ -31,8 +31,8 @@
 ;; A tree-sitter-based major mode for editing Markdown files.  Works
 ;; on Emacs 29, 30, and 31.  Features include syntax highlighting for
 ;; headings, emphasis, code spans, links, block quotes, and fenced
-;; code blocks with embedded language highlighting.  Links are clickable
-;; text buttons; `C-c C-o' runs `md-ts-open-link-at-point'.
+;; code blocks with embedded language highlighting.  Supported links are
+;; clickable text buttons; `C-c C-o' runs `md-ts-open-link-at-point'.
 ;;
 ;; Requires tree-sitter grammars:
 ;; - tree-sitter-markdown v0.4.1+
@@ -1030,14 +1030,15 @@ definition."
              nil nil #'equal))
 
 (defun md-ts--open-link-destination (url)
-  "Open Markdown or bare link destination URL.
+  "Open supported Markdown or bare link destination URL.
 URL may come from parsed links, images, references, autolinks, or
 bare prose links.  Use `url-mailto' for `mailto:' URIs,
 `browse-url' for other URI schemes, and `find-file' for local or
-relative paths.  For local paths with an unescaped `#fragment',
-open only the file part; same-buffer fragment navigation is
-deferred.  Escaped `#' characters are literal filename characters.
-Fragment-only and empty destinations are not supported yet."
+relative paths.  All fragment navigation is deferred: local paths
+with an unescaped `#fragment' open only the file part, and
+fragment-only destinations signal a `user-error'.  Escaped `#'
+characters are literal filename characters.  Empty destinations are
+not supported yet."
   (let* ((case-fold-search t)
          (fragment-start (md-ts--local-link-fragment-start url))
          (plain-url (substring-no-properties url)))
@@ -2931,17 +2932,18 @@ Markdown-inline parser ranges and link button properties in fresh
                       (line-end-position))))
 
 (defun md-ts-open-link-at-point ()
-  "Open the Markdown or bare prose link at point.
-Supported targets include parsed Markdown links, images, reference
-links, reference-definition labels, URI autolinks, email autolinks,
-bare URLs, bare email addresses, and explicit bare `mailto:' URIs.
-If point is on buttonized link text, activate that button.  If
-point is on parsed Markdown link markup, resolve the same target.
-Otherwise, fall back to a revalidated bare target at point.  Local
-paths with an unescaped `#fragment' open only the file part for
-now; same-buffer fragment navigation is not implemented yet.
-Escaped `#' characters in local paths are literal filename
-characters.  Signal a `user-error' when point is not on a
+  "Open the supported Markdown or bare prose link at point.
+Supported targets include parsed Markdown links/images and
+reference-definition labels with non-empty destinations, resolved
+reference links, URI autolinks, email autolinks, bare URLs, bare
+email addresses, and explicit bare `mailto:' URIs.  If point is on
+buttonized link text, activate that button.  If point is on parsed
+Markdown link markup, resolve the same target.  Otherwise, fall
+back to a revalidated bare target at point.  All fragment
+navigation is deferred: local paths with an unescaped `#fragment'
+open only the file part, and fragment-only destinations signal a
+`user-error'.  Escaped `#' characters in local paths are literal
+filename characters.  Signal a `user-error' when point is not on a
 supported link."
   (interactive)
   (md-ts--ensure-link-fontification-at-point)
