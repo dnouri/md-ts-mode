@@ -1066,14 +1066,15 @@ bare-link text at the button position."
           (let ((inhibit-read-only t))
             (remove-text-properties
              beg end '(md-ts-link-static-target nil)))))
-      (apply #'make-text-button
-             beg end
-             `(md-ts-link-button t
-               md-ts-link-help-echo ,url
-               action ,#'md-ts--open-link-button
-               help-echo ,url
-               ,@(when static-target
-                   `(md-ts-link-static-target ,static-target)))))))
+      (let ((help (substring-no-properties url)))
+        (apply #'make-text-button
+               beg end
+               `(md-ts-link-button t
+                 md-ts-link-help-echo ,help
+                 action ,#'md-ts--open-link-button
+                 help-echo ,help
+                 ,@(when static-target
+                     `(md-ts-link-static-target ,static-target))))))))
 
 (defconst md-ts--link-node-types
   '("inline_link" "image" "full_reference_link"
@@ -2903,6 +2904,20 @@ a `user-error' when point is not on a supported link."
 
 ;;; Major mode
 
+(defun md-ts--setup-clean-side-effect-properties ()
+  "Clean md-ts-owned whole-buffer side effects for mode setup.
+Indirect buffers share text properties with their base buffer, so a
+setup-time whole-buffer sweep there would strip the base buffer's
+current UI before regional refontification can recreate it.  Normal
+buffers still clean old md-ts properties when the mode starts."
+  (unless (buffer-base-buffer)
+    (save-restriction
+      (widen)
+      (md-ts--remove-display-properties (point-min) (point-max))
+      (md-ts--remove-bare-link-button-properties (point-min) (point-max))
+      (md-ts--remove-link-button-properties (point-min) (point-max)))
+    (md-ts--font-lock-set-stale-side-effect-bounds nil)))
+
 (defun md-ts-setup ()
   "Setup treesit for `md-ts-mode'."
   (make-local-variable 'md-ts-hide-markup)
@@ -2920,12 +2935,7 @@ a `user-error' when point is not on a supported link."
                       font-lock-extra-managed-props))))
   (setq-local font-lock-unfontify-region-function
               #'md-ts--font-lock-unfontify-region)
-  (save-restriction
-    (widen)
-    (md-ts--remove-display-properties (point-min) (point-max))
-    (md-ts--remove-bare-link-button-properties (point-min) (point-max))
-    (md-ts--remove-link-button-properties (point-min) (point-max)))
-  (md-ts--font-lock-set-stale-side-effect-bounds nil)
+  (md-ts--setup-clean-side-effect-properties)
   (add-hook 'before-change-functions
             #'md-ts--font-lock-record-stale-side-effect-bounds nil t)
   (add-hook 'before-change-functions

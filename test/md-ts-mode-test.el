@@ -902,6 +902,25 @@ inline parser ranges cause the first range's faces to be dropped."
       (md-ts-test--push-button-at-search text "here"))
     (should (equal opened url))))
 
+(ert-deftest md-ts-test-link-inline-help-echo-strips-escaped-properties ()
+  "Help strings should not retain Markdown escape provenance properties."
+  (let ((buf (md-ts-test--fontify "Open [notes](docs/a\\#b.md) please.\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "notes")
+          (let* ((pos (match-beginning 0))
+                 (help (get-text-property pos 'help-echo))
+                 (owned-help (get-text-property pos 'md-ts-link-help-echo)))
+            (should (equal help "docs/a#b.md"))
+            (should (equal owned-help "docs/a#b.md"))
+            (dolist (string (list help owned-help))
+              (should-not
+               (text-property-any 0 (length string)
+                                  md-ts--markdown-escaped-property t
+                                  string)))))
+      (kill-buffer buf))))
+
 (ert-deftest md-ts-test-link-inline-relative-path-uses-find-file ()
   "Relative inline destinations should use `find-file' semantics."
   (let ((text "Open [notes](docs/notes.md) please.\n")
@@ -3644,6 +3663,68 @@ inline parser ranges cause the first range's faces to be dropped."
           (search-forward "person@example.com")
           (should (button-at (match-beginning 0))))
       (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-indirect-setup-preserves-base-parsed-button ()
+  "Indirect `md-ts-mode' setup should not strip base parsed link buttons."
+  (let ((base (md-ts-test--fontify "See [Doc](https://example.com/doc) now.\n"))
+        indirect link-pos)
+    (unwind-protect
+        (progn
+          (with-current-buffer base
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (setq link-pos (match-beginning 0))
+            (let ((button (button-at link-pos)))
+              (should button)
+              (should (md-ts--link-button-p button))
+              (should-not (button-get button 'md-ts-link-static-target))))
+          (setq indirect (make-indirect-buffer base " *md-ts-indirect*" t))
+          ;; No explicit refontification: this catches setup-only cleanup of
+          ;; shared text properties in the base buffer.
+          (with-current-buffer indirect
+            (md-ts-mode))
+          (with-current-buffer base
+            (let ((button (button-at link-pos)))
+              (should button)
+              (should (md-ts--link-button-p button))
+              (should-not (button-get button 'md-ts-link-static-target))
+              (should (equal (get-text-property link-pos 'help-echo)
+                             "https://example.com/doc")))))
+      (when (buffer-live-p indirect)
+        (kill-buffer indirect))
+      (kill-buffer base))))
+
+(ert-deftest md-ts-test-link-bare-indirect-setup-preserves-base-button ()
+  "Indirect `md-ts-mode' setup should not strip base bare link buttons."
+  (let ((base (md-ts-test--fontify "Visit https://example.com/path now.\n"))
+        indirect link-pos)
+    (unwind-protect
+        (progn
+          (with-current-buffer base
+            (goto-char (point-min))
+            (search-forward "https://example.com/path")
+            (setq link-pos (match-beginning 0))
+            (let ((button (button-at link-pos)))
+              (should button)
+              (should (md-ts--link-button-p button))
+              (should (equal (button-get button 'md-ts-link-static-target)
+                             "https://example.com/path"))))
+          (setq indirect (make-indirect-buffer base " *md-ts-indirect*" t))
+          ;; No explicit refontification: this catches setup-only cleanup of
+          ;; shared text properties in the base buffer.
+          (with-current-buffer indirect
+            (md-ts-mode))
+          (with-current-buffer base
+            (let ((button (button-at link-pos)))
+              (should button)
+              (should (md-ts--link-button-p button))
+              (should (equal (button-get button 'md-ts-link-static-target)
+                             "https://example.com/path"))
+              (should (equal (get-text-property link-pos 'help-echo)
+                             "https://example.com/path")))))
+      (when (buffer-live-p indirect)
+        (kill-buffer indirect))
+      (kill-buffer base))))
 
 (ert-deftest md-ts-test-link-bare-indirect-fontification-recreates-base-button ()
   "Fontifying an indirect buffer should not leave base bare buttons deleted."
