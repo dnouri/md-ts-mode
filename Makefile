@@ -5,6 +5,17 @@ SELECTOR ?=
 VERBOSE ?=
 PERF_ITERATIONS ?= 3
 
+md_ts_remove_digits = $(subst 9,,$(subst 8,,$(subst 7,,$(subst 6,,$(subst 5,,$(subst 4,,$(subst 3,,$(subst 2,,$(subst 1,,$(subst 0,,$(1)))))))))))
+
+ifneq ($(filter perf,$(MAKECMDGOALS)),)
+ifneq ($(words $(PERF_ITERATIONS)),1)
+$(error PERF_ITERATIONS must be a positive integer)
+endif
+ifneq ($(call md_ts_remove_digits,$(PERF_ITERATIONS)),)
+$(error PERF_ITERATIONS must be a positive integer)
+endif
+endif
+
 .PHONY: test compile lint lint-checkdoc lint-package check check-parens clean help install-hooks snapshot perf
 
 help:
@@ -94,7 +105,11 @@ snapshot:
 
 perf:
 	@echo "=== Perf (advisory) ==="
-	@PERF_ITERATIONS=$(PERF_ITERATIONS) \
+	@if [ "$(PERF_ITERATIONS)" -lt 1 ]; then \
+		echo "PERF_ITERATIONS must be >= 1"; \
+		exit 2; \
+	fi; \
+	PERF_ITERATIONS="$(PERF_ITERATIONS)" \
 		$(BATCH) \
 		-l scripts/benchmark-document-links.el
 

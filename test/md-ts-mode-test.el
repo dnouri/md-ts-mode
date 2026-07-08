@@ -3949,6 +3949,48 @@ inline parser ranges cause the first range's faces to be dropped."
             (should-not (get-text-property pos 'md-ts-link-static-target))))
       (kill-buffer buf))))
 
+(ert-deftest md-ts-test-link-bare-fence-regional-context-edit-cleans-stale-button ()
+  "Regional fence refontification should clear enclosed stale bare UI."
+  (let ((buf (md-ts-test--fontify "https://example.com/path\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (should (button-at (point)))
+          (insert "```\n")
+          (goto-char (point-max))
+          (insert "```\n")
+          ;; Refontify only the changed delimiter line.  Expansion over the
+          ;; new multi-line unsafe node should clean the URL line too.
+          (goto-char (point-min))
+          (funcall font-lock-fontify-region-function
+                   (line-beginning-position) (line-end-position) nil)
+          (search-forward "https://example.com/path")
+          (let ((pos (match-beginning 0)))
+            (should-not (button-at pos))
+            (should-not (get-text-property pos 'md-ts-link-static-target))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-html-regional-context-edit-cleans-stale-button ()
+  "Regional HTML-block refontification should clear enclosed stale bare UI."
+  (let ((buf (md-ts-test--fontify "https://example.com/path\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (should (button-at (point)))
+          (insert "<div>\n")
+          (goto-char (point-max))
+          (insert "</div>\n")
+          ;; Refontify only the changed opening tag line.  Expansion over the
+          ;; new multi-line unsafe node should clean the URL line too.
+          (goto-char (point-min))
+          (funcall font-lock-fontify-region-function
+                   (line-beginning-position) (line-end-position) nil)
+          (search-forward "https://example.com/path")
+          (let ((pos (match-beginning 0)))
+            (should-not (button-at pos))
+            (should-not (get-text-property pos 'md-ts-link-static-target))))
+      (kill-buffer buf))))
+
 (ert-deftest md-ts-test-link-bare-edit-to-autolink-clears-static-target ()
   "Editing a bare URL into an autolink should keep a parsed button."
   (let ((url "https://example.com/path")
@@ -4051,6 +4093,38 @@ inline parser ranges cause the first range's faces to be dropped."
                            (setq opened target))))
                 (push-button pos))
               (should (equal opened url)))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-direct-push-uses-activation-position ()
+  "Stale parsed buttons should revalidate at the activated URL text."
+  (let ((buf (md-ts-test--fontify
+              (concat "[https://one.example and https://two.example]"
+                      "(https://old.example)\n")))
+        opened)
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "](https://old.example)")
+          (delete-region (match-beginning 0) (match-end 0))
+          (goto-char (point-min))
+          (delete-char 1)
+          ;; No font-lock flush/ensure: exercise direct stale-button
+          ;; activation on the second of two bare URLs in one old link span.
+          (goto-char (point-min))
+          (search-forward "https://one.example")
+          (let ((first-pos (match-beginning 0)))
+            (search-forward "https://two.example")
+            (let* ((second-pos (match-beginning 0))
+                   (button (button-at second-pos)))
+              (should button)
+              (should-not (button-get button 'md-ts-link-static-target))
+              (should (= (button-start button) first-pos))
+              (should (< (button-start button) second-pos))
+              (cl-letf (((symbol-function 'browse-url)
+                         (lambda (target &rest _args)
+                           (setq opened target))))
+                (push-button second-pos))
+              (should (equal opened "https://two.example")))))
       (kill-buffer buf))))
 
 (ert-deftest md-ts-test-link-bare-uppercase-url-with-case-fold-search-nil ()
@@ -4182,6 +4256,29 @@ inline parser ranges cause the first range's faces to be dropped."
             (funcall font-lock-fontify-region-function
                      (point-min) (point-max) nil))
           (should (= calls 1)))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-plain-prose-skips-unsafe-ranges ()
+  "Bare scanner should not precompute unsafe ranges without candidates."
+  (let ((text (mapconcat
+               (lambda (i)
+                 (format "Plain prose line %03d has words and punctuation." i))
+               (number-sequence 1 40)
+               "\n"))
+        (buf (generate-new-buffer " *md-ts-test*"))
+        (calls 0)
+        (original (symbol-function 'md-ts--bare-link-unsafe-ranges)))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert text)
+          (md-ts-mode)
+          (cl-letf (((symbol-function 'md-ts--bare-link-unsafe-ranges)
+                     (lambda (&rest args)
+                       (setq calls (1+ calls))
+                       (apply original args))))
+            (funcall font-lock-fontify-region-function
+                     (point-min) (point-max) nil))
+          (should (= calls 0)))
       (kill-buffer buf))))
 
 (ert-deftest md-ts-test-link-open-at-point-command ()

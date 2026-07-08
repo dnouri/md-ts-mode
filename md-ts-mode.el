@@ -2060,7 +2060,7 @@ left intact."
 
 (defvar md-ts--bare-link-unsafe-context-ranges
   md-ts--bare-link-unsafe-context-no-cache
-  "Dynamically bound unsafe ranges for bare-link scans.")
+  "Dynamically bound unsafe ranges or range cache for bare-link scans.")
 
 (defconst md-ts--bare-link-unsafe-range-queries
   '((markdown . ((link_reference_definition) @unsafe
@@ -2139,6 +2139,15 @@ left intact."
                   (push (cons node-beg node-end) ranges)))))))
       (md-ts--bare-link-sort-merge-ranges ranges))))
 
+(defun md-ts--bare-link-unsafe-range-cache (beg end)
+  "Return a nullary function caching unsafe ranges between BEG and END."
+  (let (ranges computed)
+    (lambda ()
+      (unless computed
+        (setq ranges (md-ts--bare-link-unsafe-ranges beg end)
+              computed t))
+      ranges)))
+
 (defun md-ts--range-intersects-sorted-ranges-p (beg end ranges)
   "Return non-nil when BEG..END intersects sorted RANGES."
   (let ((lo 0)
@@ -2173,23 +2182,28 @@ left intact."
 
 (defun md-ts--bare-link-unsafe-context-p (beg end)
   "Return non-nil when BEG to END is not prose for bare links."
-  (if (eq md-ts--bare-link-unsafe-context-ranges
-          md-ts--bare-link-unsafe-context-no-cache)
-      (let ((last-pos (max beg (1- end))))
-        (or (seq-some
-             (lambda (node)
-               (md-ts--node-has-ancestor-type-p
-                node md-ts--bare-link-unsafe-node-types))
-             (list (md-ts--node-at-containing-position beg 'markdown-inline)
-                   (md-ts--node-at-containing-position last-pos
-                                                       'markdown-inline)
-                   (md-ts--node-at-containing-position beg 'markdown)
-                   (md-ts--node-at-containing-position last-pos 'markdown)))
-            ;; Fall back to the more expensive definition query only when cheap
-            ;; point-context checks did not classify the match.
-            (md-ts--range-in-link-reference-definition-p beg end)))
+  (cond
+   ((eq md-ts--bare-link-unsafe-context-ranges
+        md-ts--bare-link-unsafe-context-no-cache)
+    (let ((last-pos (max beg (1- end))))
+      (or (seq-some
+           (lambda (node)
+             (md-ts--node-has-ancestor-type-p
+              node md-ts--bare-link-unsafe-node-types))
+           (list (md-ts--node-at-containing-position beg 'markdown-inline)
+                 (md-ts--node-at-containing-position last-pos
+                                                     'markdown-inline)
+                 (md-ts--node-at-containing-position beg 'markdown)
+                 (md-ts--node-at-containing-position last-pos 'markdown)))
+          ;; Fall back to the more expensive definition query only when cheap
+          ;; point-context checks did not classify the match.
+          (md-ts--range-in-link-reference-definition-p beg end))))
+   ((functionp md-ts--bare-link-unsafe-context-ranges)
     (md-ts--range-intersects-sorted-ranges-p
-     beg end md-ts--bare-link-unsafe-context-ranges)))
+     beg end (funcall md-ts--bare-link-unsafe-context-ranges)))
+   (t
+    (md-ts--range-intersects-sorted-ranges-p
+     beg end md-ts--bare-link-unsafe-context-ranges))))
 
 (defun md-ts--button-overlaps-region-p (beg end)
   "Return non-nil when any text or overlay button overlaps BEG to END."
@@ -2470,7 +2484,8 @@ URL-RANGES are cached generic URL ranges used to detect outer bare URLs."
             (save-match-data
               (let* ((case-fold-search t)
                      (md-ts--bare-link-unsafe-context-ranges
-                      (md-ts--bare-link-unsafe-ranges scan-beg scan-end))
+                      (md-ts--bare-link-unsafe-range-cache
+                       scan-beg scan-end))
                      (generic-url-ranges-cache
                       (md-ts--bare-link-generic-url-range-cache
                        scan-beg scan-end t)))
@@ -2540,6 +2555,12 @@ cons of markers in shared buffer coordinates.")
                         (uri_autolink) @node
                         (email_autolink) @node))))
 
+(defconst md-ts--font-lock-bare-unsafe-context-node-queries
+  '((markdown . ((fenced_code_block) @node
+                 (indented_code_block) @node
+                 (html_block) @node)))
+  "Queries for multi-line nodes that can make existing bare UI unsafe.")
+
 (defun md-ts--font-lock-line-fontify-bounds (beg end)
   "Return line-based fontification bounds covering BEG through END."
   (pcase-let ((`(,line-beg . ,line-end) (md-ts--line-bounds beg end)))
@@ -2593,6 +2614,37 @@ cons of markers in shared buffer coordinates.")
                                       (1- (treesit-node-end node))))
                       (line-beginning-position))))
       (/= start-line end-line))))
+
+(defun md-ts--font-lock-expanded-node-bounds
+    (fontify-beg fontify-end queries &optional boundary-only)
+  "Return FONTIFY-BEG..FONTIFY-END expanded over multi-line QUERIES.
+When BOUNDARY-ONLY is non-nil, only expand over nodes whose start
+or end line is touched by FONTIFY-BEG..FONTIFY-END."
+  (let ((expanded-beg fontify-beg)
+        (expanded-end fontify-end))
+    (dolist (spec queries)
+      (pcase-let ((`(,language . ,query) spec))
+        (dolist (root (md-ts--font-lock-root-nodes
+                       fontify-beg fontify-end language))
+          (dolist (capture (ignore-errors
+                              (treesit-query-capture
+                               root query fontify-beg fontify-end)))
+            (let ((node (cdr capture)))
+              (when (and (md-ts--font-lock-multiline-node-p node)
+                         (md-ts--regions-intersect-p
+                          fontify-beg fontify-end
+                          (treesit-node-start node)
+                          (treesit-node-end node))
+                         (or (not boundary-only)
+                             (md-ts--region-touches-node-boundary-line-p
+                              node fontify-beg fontify-end)))
+                (pcase-let ((`(,node-beg . ,node-end)
+                             (md-ts--font-lock-line-fontify-bounds
+                              (treesit-node-start node)
+                              (treesit-node-end node))))
+                  (setq expanded-beg (min expanded-beg node-beg)
+                        expanded-end (max expanded-end node-end)))))))))
+    (cons expanded-beg expanded-end)))
 
 (defun md-ts--font-lock-owned-side-effect-property-p (pos)
   "Return non-nil when POS has an md-ts-owned side-effect property."
@@ -2728,28 +2780,20 @@ mutate outside the bounds reported to jit-lock."
                   (setq fontify-beg expanded-beg
                         fontify-end expanded-end
                         changed t))))
-            (dolist (spec (md-ts--font-lock-side-effect-node-queries))
-              (pcase-let ((`(,language . ,query) spec))
-                (dolist (root (md-ts--font-lock-root-nodes
-                               fontify-beg fontify-end language))
-                  (dolist (capture (ignore-errors
-                                      (treesit-query-capture
-                                       root query fontify-beg fontify-end)))
-                    (let ((node (cdr capture)))
-                      (when (and (md-ts--font-lock-multiline-node-p node)
-                                 (md-ts--regions-intersect-p
-                                  fontify-beg fontify-end
-                                  (treesit-node-start node)
-                                  (treesit-node-end node)))
-                        (pcase-let ((`(,expanded-beg . ,expanded-end)
-                                     (md-ts--font-lock-line-fontify-bounds
-                                      (min fontify-beg (treesit-node-start node))
-                                      (max fontify-end (treesit-node-end node)))))
-                          (unless (and (= expanded-beg fontify-beg)
-                                       (= expanded-end fontify-end))
-                            (setq fontify-beg expanded-beg
-                                  fontify-end expanded-end
-                                  changed t)))))))))))
+            (dolist (expansion
+                     (list (cons (md-ts--font-lock-side-effect-node-queries)
+                                 nil)
+                           (cons md-ts--font-lock-bare-unsafe-context-node-queries
+                                 t)))
+              (pcase-let ((`(,expanded-beg . ,expanded-end)
+                           (md-ts--font-lock-expanded-node-bounds
+                            fontify-beg fontify-end
+                            (car expansion) (cdr expansion))))
+                (unless (and (= expanded-beg fontify-beg)
+                             (= expanded-end fontify-end))
+                  (setq fontify-beg expanded-beg
+                        fontify-end expanded-end
+                        changed t))))))
         (cons fontify-beg fontify-end)))))
 
 (defun md-ts--font-lock-fontify-region (beg end &optional loudly)
@@ -2818,7 +2862,8 @@ has the same meaning as in `md-ts--bare-link-candidate-valid-p'."
         (save-match-data
           (let* ((case-fold-search t)
                  (md-ts--bare-link-unsafe-context-ranges
-                  (md-ts--bare-link-unsafe-ranges line-beg line-end))
+                  (md-ts--bare-link-unsafe-range-cache
+                   line-beg line-end))
                  (generic-url-ranges-cache
                   (md-ts--bare-link-generic-url-range-cache
                    line-beg line-end check-overlap)))
@@ -2847,10 +2892,14 @@ has the same meaning as in `md-ts--bare-link-candidate-valid-p'."
 Static bare-link buttons prefer recomputing their current bare
 link target at activation time.  Parsed Markdown buttons prefer
 resolving the parsed target at activation time so reference links
-stay fresh.  If stale button properties no longer match the
+stay fresh.  Text-button actions pass a marker at the actual
+activation position; use that position when available so stale
+multi-URL button spans revalidate the clicked URL, not just the
+button start.  If stale button properties no longer match the
 current buffer syntax, fall back to the other resolver before
 signaling."
-  (let* ((pos (button-start button))
+  (let* ((pos (or (and (markerp button) (marker-position button))
+                  (button-start button)))
          (url (if (button-get button 'md-ts-link-static-target)
                   (or (md-ts--bare-link-target-at-point pos 'foreign)
                       (md-ts--link-target-at-point pos))

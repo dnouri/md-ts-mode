@@ -115,6 +115,16 @@
       (push (md-ts-bench--time-ms thunk) times))
     (nreverse times)))
 
+(defun md-ts-bench--plain-prose-doc (lines)
+  "Return a plain Markdown prose fixture with LINES lines and no links."
+  (mapconcat
+   (lambda (i)
+     (format (concat "Plain prose %04d has ordinary words, punctuation, "
+                     "and markdown-free discussion for a no-link control.")
+             i))
+   (number-sequence 1 lines)
+   "\n"))
+
 (defun md-ts-bench--bare-links-doc (lines)
   "Return a bare URL/email Markdown fixture with LINES lines."
   (mapconcat
@@ -273,7 +283,9 @@
         ;; first reported case without adding an extra expensive run per fixture.
         (md-ts-bench--fontify-text
          "# Warmup\n\nText [x](https://example.com) https://example.org user@example.org\n")
-        (let ((cases `(("bare-links-100" mode+font-lock
+        (let ((cases `(("plain-prose-800" mode+font-lock
+                        ,(md-ts-bench--plain-prose-doc 800) 800 "lines")
+                       ("bare-links-100" mode+font-lock
                         ,(md-ts-bench--bare-links-doc 100) 100 "lines")
                        ("bare-links-400" mode+font-lock
                         ,(md-ts-bench--bare-links-doc 400) 400 "lines")
