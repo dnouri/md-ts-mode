@@ -25,12 +25,28 @@ Emacs 29, 30, and 31.
 - YAML and TOML front matter fontified when their grammars are
   available.
 - Hide-markup mode: ~md-ts-toggle-hide-markup~ hides delimiters
-  (=#=, =*=, =~=, brackets, URLs) so only content is visible.
+  (=#=, =*=, =~=, brackets, URLs) so only content is visible; visible
+  link text remains activatable.
 - Imenu and ~outline-minor-mode~ integration via headings.
 - Custom faces: ~md-ts-heading-1~ through ~md-ts-heading-6~,
   ~md-ts-setext-heading~, ~md-ts-delimiter~, ~md-ts-list-marker~,
   ~md-ts-block-quote~, ~md-ts-strikethrough~,
   ~md-ts-language-keyword~, and ~md-ts-task-list-marker~.
+
+
+** Opening links
+
+~md-ts-mode~ buttonizes Markdown links, images, reference links,
+reference-definition labels, URI autolinks, email autolinks, and bare
+prose URLs, email addresses, and =mailto:= URIs.  Use =C-c C-o=
+(~md-ts-open-link-at-point~) to open the link at point; standard Emacs
+button mouse/help-echo behavior applies.
+
+Local and relative paths open with ~find-file~, =mailto:= targets use
+Emacs' mailto handler, and other URI schemes use ~browse-url~.  For
+local paths such as =file.md#heading=, only the file part is opened for
+now; same-buffer fragment navigation is not implemented yet.  Escaped
+hashes such as =a\#b.md= are literal filename characters.
 
 
 ** Requirements
@@ -101,6 +117,13 @@ Install the grammar for any language you want highlighted:
 The variable ~md-ts-code-block-source-mode-map~ maps language
 symbols to their tree-sitter major modes.  The mode must be
 installed and its grammar available for highlighting to work.
+
+
+** Development
+
+Run ~make check~ before sending changes.  ~make perf~ runs advisory
+link fontification benchmarks; compare =RESULT= lines from runs on the
+same machine rather than treating them as pass/fail thresholds.
 
 
 ** Compatibility

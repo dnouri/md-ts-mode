@@ -31,7 +31,8 @@
 ;; A tree-sitter-based major mode for editing Markdown files.  Works
 ;; on Emacs 29, 30, and 31.  Features include syntax highlighting for
 ;; headings, emphasis, code spans, links, block quotes, and fenced
-;; code blocks with embedded language highlighting.
+;; code blocks with embedded language highlighting.  Links are clickable
+;; text buttons; `C-c C-o' runs `md-ts-open-link-at-point'.
 ;;
 ;; Requires tree-sitter grammars:
 ;; - tree-sitter-markdown v0.4.1+
@@ -724,7 +725,8 @@ maps to tree-sitter language `cpp'.")
   "An alist of supported code block languages and their major mode.")
 
 (defcustom md-ts-hide-markup nil
-  "Non-nil means hide Markdown markup delimiters in this buffer."
+  "Non-nil means hide Markdown markup delimiters in this buffer.
+Visible link text remains activatable when link markup is hidden."
   :type 'boolean
   :safe #'booleanp
   :group 'md-ts)
@@ -1028,12 +1030,14 @@ definition."
              nil nil #'equal))
 
 (defun md-ts--open-link-destination (url)
-  "Open inline Markdown link destination URL.
-Use `url-mailto' for `mailto:' URIs, `browse-url' for other URI
-schemes, and `find-file' for local or relative paths.  For local
-paths with a #fragment, open only the file part; fragment
-navigation is deferred.  Fragment-only and empty destinations are
-not supported yet."
+  "Open Markdown or bare link destination URL.
+URL may come from parsed links, images, references, autolinks, or
+bare prose links.  Use `url-mailto' for `mailto:' URIs,
+`browse-url' for other URI schemes, and `find-file' for local or
+relative paths.  For local paths with an unescaped `#fragment',
+open only the file part; same-buffer fragment navigation is
+deferred.  Escaped `#' characters are literal filename characters.
+Fragment-only and empty destinations are not supported yet."
   (let* ((case-fold-search t)
          (fragment-start (md-ts--local-link-fragment-start url))
          (plain-url (substring-no-properties url)))
@@ -2473,7 +2477,8 @@ URL-RANGES are cached generic URL ranges used to detect outer bare URLs."
       found)))
 
 (defun md-ts--fontify-bare-links (beg end)
-  "Fontify bare URLs and email addresses on lines covering BEG to END."
+  "Fontify bare URLs, email addresses, and `mailto:' URIs.
+Operate on lines covering BEG to END."
   (pcase-let ((`(,scan-beg . ,scan-end) (md-ts--line-bounds beg end)))
     (with-silent-modifications
       (let ((inhibit-read-only t))
@@ -2851,7 +2856,7 @@ TEXT).  CHECK-OVERLAP has the same meaning as in
             (throw 'target target)))))))
 
 (defun md-ts--bare-link-target-at-point (&optional pos check-overlap)
-  "Return current valid bare URL/email target at POS, or nil.
+  "Return current valid bare URL, email, or `mailto:' URI target at POS.
 This recomputes from buffer text and parser context instead of
 trusting possibly stale static button properties.  CHECK-OVERLAP
 has the same meaning as in `md-ts--bare-link-candidate-valid-p'."
@@ -2927,11 +2932,17 @@ Markdown-inline parser ranges and link button properties in fresh
 
 (defun md-ts-open-link-at-point ()
   "Open the Markdown or bare prose link at point.
+Supported targets include parsed Markdown links, images, reference
+links, reference-definition labels, URI autolinks, email autolinks,
+bare URLs, bare email addresses, and explicit bare `mailto:' URIs.
 If point is on buttonized link text, activate that button.  If
 point is on parsed Markdown link markup, resolve the same target.
-Otherwise, fall back to a revalidated bare URL/email target at
-point.  Open targets with `md-ts--open-link-destination'.  Signal
-a `user-error' when point is not on a supported link."
+Otherwise, fall back to a revalidated bare target at point.  Local
+paths with an unescaped `#fragment' open only the file part for
+now; same-buffer fragment navigation is not implemented yet.
+Escaped `#' characters in local paths are literal filename
+characters.  Signal a `user-error' when point is not on a
+supported link."
   (interactive)
   (md-ts--ensure-link-fontification-at-point)
   (let ((button (button-at (point))))
@@ -2946,7 +2957,9 @@ a `user-error' when point is not on a supported link."
           (user-error "No Markdown or bare link at point"))))))
 
 (defvar md-ts-mode-map (make-sparse-keymap)
-  "Keymap for `md-ts-mode'.")
+  "Keymap for `md-ts-mode'.
+\\<md-ts-mode-map>\\[md-ts-open-link-at-point] runs
+`md-ts-open-link-at-point'.")
 
 (set-keymap-parent md-ts-mode-map text-mode-map)
 (define-key md-ts-mode-map (kbd "C-c C-o") #'md-ts-open-link-at-point)
