@@ -25,8 +25,8 @@ Emacs 29, 30, and 31.
 - YAML and TOML front matter fontified when their grammars are
   available.
 - Hide-markup mode: ~md-ts-toggle-hide-markup~ hides delimiters
-  (=#=, =*=, =~=, brackets, URLs) so only content is visible; visible
-  link text remains activatable.
+  (=#=, =*=, =~=, brackets, link destinations) so only content is visible;
+  visible link text remains activatable.
 - Imenu and ~outline-minor-mode~ integration via headings.
 - Custom faces: ~md-ts-heading-1~ through ~md-ts-heading-6~,
   ~md-ts-setext-heading~, ~md-ts-delimiter~, ~md-ts-list-marker~,
@@ -38,14 +38,17 @@ Emacs 29, 30, and 31.
 
 ~md-ts-mode~ buttonizes Markdown links, images, reference links,
 reference-definition labels, URI autolinks, email autolinks, and bare
-prose URLs, email addresses, and =mailto:= URIs.  Use =C-c C-o=
+prose URLs, email addresses, and =mailto:= URIs.  Bare-link detection is
+prose-only and skips code, HTML, parsed-link/autolink, and
+reference-definition contexts.  Use =C-c C-o=
 (~md-ts-open-link-at-point~) to open the link at point; standard Emacs
 button mouse/help-echo behavior applies.
 
 Local and relative paths open with ~find-file~, =mailto:= targets use
 Emacs' mailto handler, and other URI schemes use ~browse-url~.  For
 local paths such as =file.md#heading=, only the file part is opened for
-now; same-buffer fragment navigation is not implemented yet.  Escaped
+now; same-buffer fragment navigation is not implemented yet.
+Fragment-only links such as =#heading= are unsupported for now.  Escaped
 hashes such as =a\#b.md= are literal filename characters.
 
 
