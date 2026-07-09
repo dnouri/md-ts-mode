@@ -1766,11 +1766,51 @@ all font-lock state."
   (or (md-ts--link-button-p button)
       (md-ts--legacy-link-button-p button)))
 
+(defun md-ts--overlay-button-p (overlay)
+  "Return non-nil if OVERLAY is a real button overlay."
+  (and (overlay-get overlay 'button)
+       (overlay-get overlay 'category)))
+
+(defun md-ts--base-overlay-counterpart-p (overlay)
+  "Return non-nil if indirect-buffer OVERLAY mirrors a base overlay."
+  (when-let* ((base (buffer-base-buffer))
+              (beg (overlay-start overlay))
+              (end (overlay-end overlay)))
+    (let ((button (overlay-get overlay 'button)))
+      (or (and (overlayp button)
+               (eq (overlay-buffer button) base))
+          (with-current-buffer base
+            (seq-some
+             (lambda (base-overlay)
+               (and (= (overlay-start base-overlay) beg)
+                    (= (overlay-end base-overlay) end)
+                    (md-ts--overlay-button-p base-overlay)
+                    (equal (overlay-get base-overlay 'category)
+                           (overlay-get overlay 'category))
+                    (equal (overlay-get base-overlay 'help-echo)
+                           (overlay-get overlay 'help-echo))
+                    (eq (overlay-get base-overlay 'action)
+                        (overlay-get overlay 'action))))
+             (overlays-in beg end)))))))
+
+(defun md-ts--shared-overlay-button-p (overlay)
+  "Return non-nil if OVERLAY should block shared text button props."
+  (and (md-ts--overlay-button-p overlay)
+       (or (not (buffer-base-buffer))
+           (md-ts--base-overlay-counterpart-p overlay))))
+
 (defun md-ts--foreign-overlay-button-in-region-p (beg end)
   "Return non-nil if a foreign overlay button overlaps BEG to END."
   (seq-some (lambda (overlay)
-              (and (overlay-get overlay 'button)
-                   (overlay-get overlay 'category)
+              (and (md-ts--overlay-button-p overlay)
+                   (not (md-ts--owned-link-button-p overlay))
+                   overlay))
+            (overlays-in beg end)))
+
+(defun md-ts--foreign-shared-overlay-button-in-region-p (beg end)
+  "Return non-nil if a foreign shared overlay button overlaps BEG to END."
+  (seq-some (lambda (overlay)
+              (and (md-ts--shared-overlay-button-p overlay)
                    (not (md-ts--owned-link-button-p overlay))
                    overlay))
             (overlays-in beg end)))
@@ -1805,11 +1845,10 @@ all font-lock state."
 (defun md-ts--foreign-button-shared-text-blocker-in-region-p (beg end)
   "Return non-nil if foreign buttons in BEG to END block shared text props.
 Overlay buttons are buffer-local, unlike text properties.  In an
-indirect buffer, a local foreign overlay should not remove or block
-shared md-ts text-button properties in the base buffer."
+indirect buffer, local overlays do not block shared md-ts text-button
+properties, but overlays cloned from the base buffer still do."
   (or (md-ts--foreign-text-button-in-region-p beg end)
-      (and (not (buffer-base-buffer))
-           (md-ts--foreign-overlay-button-in-region-p beg end))))
+      (md-ts--foreign-shared-overlay-button-in-region-p beg end)))
 
 (defun md-ts--property-span (pos prop)
   "Return the span of PROP around POS as a cons cell."
@@ -2124,9 +2163,13 @@ left intact."
   "Unfontify BEG to END and clean md-ts-owned side effects."
   (with-silent-modifications
     (let ((inhibit-read-only t))
-      (md-ts--remove-display-properties beg end)
-      (md-ts--remove-bare-link-button-properties beg end)
-      (md-ts--remove-link-button-properties beg end)
+      ;; Indirect buffers share text properties with their base buffer.  Avoid
+      ;; destructive md-ts side-effect cleanup there; paired refontification can
+      ;; still refresh stale shared props through `md-ts--font-lock-fontify-region'.
+      (unless (buffer-base-buffer)
+        (md-ts--remove-display-properties beg end)
+        (md-ts--remove-bare-link-button-properties beg end)
+        (md-ts--remove-link-button-properties beg end))
       (font-lock-default-unfontify-region beg end))))
 
 (defun md-ts--treesit-query-specs-for-node-types (specs capture)
@@ -2313,8 +2356,14 @@ left intact."
 (defun md-ts--overlay-button-in-region-p (beg end)
   "Return non-nil when any real overlay button overlaps BEG to END."
   (seq-some (lambda (overlay)
-              (and (overlay-get overlay 'button)
-                   (overlay-get overlay 'category)
+              (and (md-ts--overlay-button-p overlay)
+                   overlay))
+            (overlays-in beg end)))
+
+(defun md-ts--shared-overlay-button-in-region-p (beg end)
+  "Return non-nil when any shared overlay button overlaps BEG to END."
+  (seq-some (lambda (overlay)
+              (and (md-ts--shared-overlay-button-p overlay)
                    overlay))
             (overlays-in beg end)))
 
@@ -2342,11 +2391,10 @@ left intact."
 (defun md-ts--button-shared-text-blocker-in-region-p (beg end)
   "Return non-nil if buttons in BEG to END block shared md-ts text props.
 Overlay buttons are buffer-local, unlike text properties.  In an
-indirect buffer, a local overlay should not prevent writing shared
-md-ts text-button properties needed by the base buffer."
+indirect buffer, local overlays do not block shared md-ts text-button
+properties, but overlays cloned from the base buffer still do."
   (or (md-ts--text-button-in-region-p beg end)
-      (and (not (buffer-base-buffer))
-           (md-ts--overlay-button-in-region-p beg end))))
+      (md-ts--shared-overlay-button-in-region-p beg end)))
 
 (defconst md-ts--bare-link-terminal-punctuation '(?. ?, ?\; ?\: ?\! ?\?)
   "Prose punctuation trimmed from the end of bare link matches.")
@@ -2634,11 +2682,24 @@ Return nil when POS is inside one of the sorted EXCLUDED-RANGES."
     (unless blocked
       (cons segment-beg segment-end))))
 
+(defun md-ts--bare-link-coverage-end (raw-end scan-end)
+  "Return containment end for raw bare URL match ending at RAW-END.
+SCAN-END bounds trailing punctuation coverage."
+  (save-excursion
+    (goto-char raw-end)
+    (let ((limit (min scan-end (line-end-position))))
+      (while (and (< (point) limit)
+                  (memq (char-after) md-ts--bare-link-terminal-punctuation))
+        (forward-char 1))
+      (point))))
+
 (defun md-ts--bare-link-generic-url-ranges
     (scan-beg scan-end &optional check-overlap)
   "Return valid generic bare URL ranges between SCAN-BEG and SCAN-END.
 Each returned vector element has the form [BEG END PREFIX-MAX-END TEXT].
-CHECK-OVERLAP has the same meaning as in
+BEG, END, and TEXT are normalized for fontification and activation;
+PREFIX-MAX-END keeps raw match plus terminal-punctuation coverage for
+containment checks.  CHECK-OVERLAP has the same meaning as in
 `md-ts--bare-link-candidate-valid-p'.  The prefix maximum lets
 mailto containment checks avoid rescanning `goto-address-url-regexp'
 for every explicit mailto candidate."
@@ -2653,7 +2714,10 @@ for every explicit mailto candidate."
                         (match-beginning 0) (match-end 0))))
             (when (md-ts--bare-link-candidate-valid-p
                    url-beg url-end text check-overlap)
-              (setq prefix-max-end (max prefix-max-end url-end))
+              (setq prefix-max-end
+                    (max prefix-max-end
+                         (md-ts--bare-link-coverage-end
+                          (match-end 0) scan-end)))
               (push (vector url-beg url-end prefix-max-end text) ranges))))))
     (vconcat (nreverse ranges))))
 
