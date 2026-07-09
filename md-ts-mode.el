@@ -2821,12 +2821,14 @@ jit-lock bounds for the expanded physical lines fontified and bare-scanned."
 POS defaults to point.  This covers both visible link text and the
 parsed markup belonging to a link."
   (let ((pos (or pos (point))))
-    (seq-some (lambda (node)
-                (and node (md-ts--link-target-for-node node)))
-              (list (md-ts--node-at-containing-position
-                     pos 'markdown-inline)
-                    (md-ts--node-at-containing-position
-                     pos 'markdown)))))
+    (save-restriction
+      (widen)
+      (seq-some (lambda (node)
+                  (and node (md-ts--link-target-for-node node)))
+                (list (md-ts--node-at-containing-position
+                       pos 'markdown-inline)
+                      (md-ts--node-at-containing-position
+                       pos 'markdown))))))
 
 (defun md-ts--bare-link-target-at-point-with-regexp
     (pos regexp line-beg line-end target-function &optional skip-function
@@ -2906,10 +2908,14 @@ current buffer syntax, fall back to the other resolver before
 signaling."
   (let* ((pos (or (and (markerp button) (marker-position button))
                   (button-start button)))
-         (url (if (button-get button 'md-ts-link-static-target)
+         (static-target (button-get button 'md-ts-link-static-target))
+         (url (if static-target
                   (or (md-ts--bare-link-target-at-point pos 'foreign)
                       (md-ts--link-target-at-point pos))
                 (or (md-ts--link-target-at-point pos)
+                    (progn
+                      (md-ts--ensure-link-fontification-at-point pos)
+                      (md-ts--link-target-at-point pos))
                     (md-ts--bare-link-target-at-point pos)))))
     (if url
         (md-ts--open-link-destination url)
@@ -2923,13 +2929,17 @@ signaling."
 
 (defun md-ts--ensure-link-fontification-at-point (&optional pos)
   "Ensure font-lock and tree-sitter link state around POS.
-POS defaults to point.  Fontifying the containing line initializes
-Markdown-inline parser ranges and link button properties in fresh
-`md-ts-mode' buffers."
-  (save-excursion
-    (goto-char (or pos (point)))
-    (font-lock-ensure (line-beginning-position)
-                      (line-end-position))))
+POS defaults to point.  Fontifying the containing physical line
+initializes Markdown-inline parser ranges and link button
+properties in fresh `md-ts-mode' buffers, even when the current
+buffer is narrowed to only part of the link."
+  (let ((pos (or pos (point))))
+    (save-excursion
+      (save-restriction
+        (widen)
+        (goto-char pos)
+        (font-lock-ensure (line-beginning-position)
+                          (line-end-position))))))
 
 (defun md-ts-open-link-at-point ()
   "Open the supported Markdown or bare prose link at point.

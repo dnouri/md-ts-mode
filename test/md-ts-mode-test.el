@@ -3694,6 +3694,37 @@ inline parser ranges cause the first range's faces to be dropped."
         (kill-buffer indirect))
       (kill-buffer base))))
 
+(ert-deftest md-ts-test-link-indirect-inherited-parsed-button-prefers-destination ()
+  "Indirect parsed button activation should not open a URL-like label."
+  (let ((base (md-ts-test--fontify
+               (concat "See [https://label.example]"
+                       "(https://destination.example) now.\n")))
+        indirect link-pos opened)
+    (unwind-protect
+        (progn
+          (with-current-buffer base
+            (goto-char (point-min))
+            (search-forward "https://label.example")
+            (setq link-pos (match-beginning 0))
+            (let ((button (button-at link-pos)))
+              (should (md-ts--link-button-p button))
+              (should-not (button-get button 'md-ts-link-static-target))))
+          (setq indirect (make-indirect-buffer base " *md-ts-indirect*" t))
+          (with-current-buffer indirect
+            (md-ts-mode)
+            (goto-char link-pos)
+            (let ((button (button-at link-pos)))
+              (should (md-ts--link-button-p button))
+              (should-not (button-get button 'md-ts-link-static-target)))
+            (cl-letf (((symbol-function 'browse-url)
+                       (lambda (url &rest _args)
+                         (setq opened url))))
+              (push-button link-pos))
+            (should (equal opened "https://destination.example"))))
+      (when (buffer-live-p indirect)
+        (kill-buffer indirect))
+      (kill-buffer base))))
+
 (ert-deftest md-ts-test-link-bare-indirect-setup-preserves-base-button ()
   "Indirect `md-ts-mode' setup should not strip base bare link buttons."
   (let ((base (md-ts-test--fontify "Visit https://example.com/path now.\n"))
@@ -4291,6 +4322,47 @@ inline parser ranges cause the first range's faces to be dropped."
        "Visit [here](https://example.com) now.\n"
        "here"))
     (should (equal opened "https://example.com"))))
+
+(ert-deftest md-ts-test-link-push-button-parsed-works-while-narrowed ()
+  "Parsed text buttons should resolve destinations while narrowed to text."
+  (let ((buf (md-ts-test--fontify
+              "Visit [here](https://target.example) now.\n"))
+        opened)
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "here")
+          (let ((beg (match-beginning 0))
+                (end (match-end 0)))
+            (narrow-to-region beg end)
+            (goto-char beg)
+            (should (md-ts--link-button-p (button-at beg)))
+            (cl-letf (((symbol-function 'browse-url)
+                       (lambda (url &rest _args)
+                         (setq opened url))))
+              (push-button beg))
+            (should (equal opened "https://target.example"))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-open-at-point-parsed-works-while-narrowed ()
+  "`md-ts-open-link-at-point' should resolve destinations while narrowed."
+  (let ((buf (md-ts-test--fontify
+              "Visit [here](https://target.example) now.\n"))
+        opened)
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "here")
+          (let ((beg (match-beginning 0))
+                (end (match-end 0)))
+            (narrow-to-region beg end)
+            (goto-char beg)
+            (cl-letf (((symbol-function 'browse-url)
+                       (lambda (url &rest _args)
+                         (setq opened url))))
+              (md-ts-open-link-at-point))
+            (should (equal opened "https://target.example"))))
+      (kill-buffer buf))))
 
 (ert-deftest md-ts-test-link-open-at-point-on-markup ()
   "`md-ts-open-link-at-point' should reuse parser targets on link markup."
