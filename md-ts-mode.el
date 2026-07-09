@@ -2939,12 +2939,13 @@ reference links, URI autolinks, email autolinks, bare URLs, bare
 email addresses, and explicit bare `mailto:' URIs.  If point is on
 buttonized link text, activate that button.  If point is on parsed
 Markdown link markup, resolve the same target.  Otherwise, fall
-back to a revalidated bare target at point.  All fragment
-navigation is deferred: local paths with an unescaped `#fragment'
-open only the file part, and fragment-only destinations signal a
-`user-error'.  Escaped `#' characters in local paths are literal
-filename characters.  Signal a `user-error' when point is not on a
-supported link."
+back to a revalidated bare target at point.  URI fragments on
+`browse-url' targets are passed through with the URI.
+Local/same-buffer fragment navigation is deferred: local paths with
+an unescaped `#fragment' open only the file part, and fragment-only
+destinations signal a `user-error'.  Escaped `#' characters in
+local paths are literal filename characters.  Signal a `user-error'
+when point is not on a supported link."
   (interactive)
   (md-ts--ensure-link-fontification-at-point)
   (let ((button (button-at (point))))

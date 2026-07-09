@@ -47,10 +47,11 @@ button mouse/help-echo behavior applies.
 
 Local and relative paths open with ~find-file~, =mailto:= targets use
 Emacs' mailto handler, and other URI schemes use ~browse-url~.
-Fragment navigation is deferred: local paths such as =file.md#heading=
-open only =file.md=, and fragment-only links such as =#heading= are
-unsupported and signal an error for now.  Escaped hashes such as
-=a\#b.md= are literal filename characters.
+URI fragments in targets opened by ~browse-url~ are passed through.
+Local/same-buffer fragment navigation is deferred: local paths such as
+=file.md#heading= open only =file.md=, and fragment-only links such as
+=#heading= are unsupported and signal an error for now.  Escaped hashes
+such as =a\#b.md= are literal filename characters.
 
 
 ** Requirements
