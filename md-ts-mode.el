@@ -1803,7 +1803,7 @@ all font-lock state."
   "Text properties that delimit md-ts link-button cleanup segments.")
 
 (defconst md-ts--foreign-interactive-text-properties
-  '(help-echo action keymap local-map mouse-face follow-link)
+  '(help-echo action category keymap local-map mouse-face follow-link)
   "Non-button text properties that md-ts link UI must not overwrite.")
 
 (defun md-ts--legacy-link-button-p (button)
@@ -1946,12 +1946,14 @@ properties, but overlays cloned from the base buffer still do."
 (defun md-ts--current-text-link-button-p (pos)
   "Return non-nil if POS has a current md-ts text link button."
   (and (md-ts--text-button-at-p pos)
+       (eq (get-text-property pos 'category) 'default-button)
        (get-text-property pos 'md-ts-link-button)
        (eq (get-text-property pos 'action) #'md-ts--open-link-button)))
 
 (defun md-ts--legacy-dynamic-text-link-button-p (pos)
   "Return non-nil if POS has a legacy dynamic md-ts text button."
   (and (md-ts--text-button-at-p pos)
+       (eq (get-text-property pos 'category) 'default-button)
        (not (get-text-property pos 'md-ts-link-button))
        (eq (get-text-property pos 'action) #'md-ts--open-link-button)
        (stringp (get-text-property pos 'help-echo))))
@@ -1977,7 +1979,22 @@ properties, but overlays cloned from the base buffer still do."
   "Return non-nil if POS has an md-ts-owned `help-echo' value."
   (let ((help (get-text-property pos 'help-echo))
         (owned-help (get-text-property pos 'md-ts-link-help-echo)))
-    (and owned-help (equal help owned-help))))
+    (and owned-help
+         (equal help owned-help)
+         (or (md-ts--owned-text-link-button-p pos)
+             ;; Legacy buttons have no md-ts-specific owner token, but the
+             ;; md-ts action/category shape makes their help echo ours.
+             (md-ts--legacy-dynamic-text-link-button-p pos)
+             ;; Residual md-ts metadata with no remaining interactive direct
+             ;; owner is stale.  If a foreign button/action/category/keymap is
+             ;; present, equal help text is not enough to claim ownership.
+             (not (or (md-ts--direct-text-property pos 'button)
+                      (md-ts--direct-text-property pos 'category)
+                      (md-ts--direct-text-property pos 'action)
+                      (md-ts--direct-text-property pos 'keymap)
+                      (md-ts--direct-text-property pos 'local-map)
+                      (md-ts--direct-text-property pos 'mouse-face)
+                      (md-ts--direct-text-property pos 'follow-link)))))))
 
 (defun md-ts--direct-text-property (pos prop)
   "Return direct text property PROP at POS, ignoring category defaults."
@@ -1990,6 +2007,8 @@ properties, but overlays cloned from the base buffer still do."
            (not (md-ts--legacy-dynamic-text-link-button-p pos)))
       (let ((action (md-ts--direct-text-property pos 'action)))
         (and action (not (eq action #'md-ts--open-link-button))))
+      (let ((category (md-ts--direct-text-property pos 'category)))
+        (and category (not (eq category 'default-button))))
       (md-ts--direct-text-property pos 'keymap)
       (md-ts--direct-text-property pos 'local-map)
       (md-ts--direct-text-property pos 'mouse-face)
@@ -2052,16 +2071,42 @@ properties, but overlays cloned from the base buffer still do."
           (remove-text-properties pos next '(help-echo nil)))
         (setq pos next)))))
 
+(defun md-ts--remove-owned-link-button-properties-in-region (beg end
+                                                                 residual-props)
+  "Remove md-ts-owned link-button properties from BEG to END.
+RESIDUAL-PROPS is the md-ts-specific cleanup plist to remove in
+all segments.  Shared button properties are removed only while
+their direct values still have the md-ts action/category shape."
+  (let ((pos beg))
+    (while (< pos end)
+      (let* ((next (md-ts--next-link-button-property-change pos end))
+             (action (md-ts--direct-text-property pos 'action))
+             (category (md-ts--direct-text-property pos 'category))
+             (owned-action (eq action #'md-ts--open-link-button))
+             (remove-props residual-props))
+        (when owned-action
+          (setq remove-props (append '(button nil action nil) remove-props))
+          (when (eq category 'default-button)
+            (setq remove-props (append '(category nil) remove-props))))
+        (when (or (md-ts--stale-link-help-echo-p pos)
+                  (md-ts--legacy-dynamic-text-link-button-p pos)
+                  (and owned-action
+                       (equal (md-ts--direct-text-property pos 'help-echo)
+                              (get-text-property pos
+                                                 'md-ts-link-help-echo))))
+          (setq remove-props (append '(help-echo nil) remove-props)))
+        (remove-text-properties pos next remove-props)
+        (setq pos next)))))
+
 (defun md-ts--remove-link-residual-properties-at (pos)
   "Remove stale md-ts residual link properties at POS.
 Return the end of the removed cleanup segment.  Foreign text button
 properties are not removed."
   (pcase-let ((`(,span-beg . ,span-end)
                (md-ts--link-button-property-segment pos)))
-    (md-ts--remove-stale-link-help-echo-properties span-beg span-end)
     (md-ts--remove-link-face-from-region span-beg span-end)
-    (remove-text-properties span-beg span-end
-                            md-ts--link-button-residual-properties)
+    (md-ts--remove-owned-link-button-properties-in-region
+     span-beg span-end md-ts--link-button-residual-properties)
     span-end))
 
 (defun md-ts--remove-link-button-properties (beg end)
@@ -2079,12 +2124,10 @@ buttons are cleared without taking ownership."
           (cond
            ((md-ts--owned-text-link-button-p pos)
             (pcase-let ((`(,span-beg . ,span-end)
-                         (md-ts--property-span pos 'button)))
-              (md-ts--remove-stale-link-help-echo-properties
-               span-beg span-end)
+                         (md-ts--link-button-property-segment pos)))
               (md-ts--remove-link-face-from-region span-beg span-end)
-              (remove-text-properties
-               span-beg span-end md-ts--link-button-properties)
+              (md-ts--remove-owned-link-button-properties-in-region
+               span-beg span-end md-ts--link-button-residual-properties)
               (setq pos (min limit (max (1+ pos) span-end)))))
            ((md-ts--link-residual-property-at-p pos)
             (setq pos (min limit
@@ -2108,22 +2151,17 @@ Static bare-link buttons and foreign text or overlay buttons are left intact."
             (cond
              ((md-ts--parsed-text-link-button-p pos)
               (pcase-let ((`(,span-beg . ,span-end)
-                           (md-ts--property-span pos 'button)))
-                (md-ts--remove-stale-link-help-echo-properties
-                 span-beg span-end)
-                (remove-text-properties
-                 span-beg span-end md-ts--parsed-link-button-properties)
+                           (md-ts--link-button-property-segment pos)))
+                (md-ts--remove-owned-link-button-properties-in-region
+                 span-beg span-end md-ts--parsed-link-button-residual-properties)
                 (setq pos (min limit (max (1+ pos) span-end)))))
              ((and (not (get-text-property pos 'md-ts-link-static-target))
                    (or (get-text-property pos 'md-ts-link-button)
                        (get-text-property pos 'md-ts-link-help-echo)))
               (pcase-let ((`(,span-beg . ,span-end)
                            (md-ts--link-button-property-segment pos)))
-                (md-ts--remove-stale-link-help-echo-properties
-                 span-beg span-end)
-                (remove-text-properties
-                 span-beg span-end
-                 md-ts--parsed-link-button-residual-properties)
+                (md-ts--remove-owned-link-button-properties-in-region
+                 span-beg span-end md-ts--parsed-link-button-residual-properties)
                 (setq pos (min limit (max (1+ pos) span-end)))))
              (t
               (setq pos (md-ts--next-link-button-property-change
@@ -2159,7 +2197,9 @@ Static bare-link buttons and foreign text or overlay buttons are left intact."
       (let ((next (md-ts--next-link-face-property-change pos end)))
         (unless (md-ts--link-face-value-p (get-text-property pos 'face))
           (add-face-text-property pos next 'link t)
-          (put-text-property pos next 'md-ts-bare-link-face t))
+          (put-text-property pos next 'md-ts-bare-link-face
+                             (list :md-ts-face
+                                   (get-text-property pos 'face))))
         (setq pos next)))))
 
 (defun md-ts--remove-link-face-from-region (beg end)
@@ -2169,10 +2209,18 @@ Static bare-link buttons and foreign text or overlay buttons are left intact."
       (let* ((next (md-ts--next-link-face-property-change pos end))
              (owned (get-text-property pos 'md-ts-bare-link-face))
              (face (get-text-property pos 'face))
-             (new-face (and owned (md-ts--remove-link-face-value face))))
+             (owned-face (and (consp owned)
+                              (eq (car owned) :md-ts-face)
+                              (cadr owned)))
+             (owned-current-face (if (eq owned t)
+                                     (md-ts--link-face-value-p face)
+                                   (equal face owned-face)))
+             (new-face (and owned-current-face
+                            (md-ts--remove-link-face-value face))))
         (when owned
-          (unless (equal face new-face)
-            (put-text-property pos next 'face new-face))
+          (when owned-current-face
+            (unless (equal face new-face)
+              (put-text-property pos next 'face new-face)))
           (remove-text-properties pos next '(md-ts-bare-link-face nil)))
         (setq pos next)))))
 
@@ -2195,20 +2243,16 @@ left intact."
             (cond
              ((md-ts--static-bare-text-link-button-p pos)
               (pcase-let ((`(,span-beg . ,span-end)
-                           (md-ts--property-span pos 'button)))
-                (md-ts--remove-stale-link-help-echo-properties
-                 span-beg span-end)
+                           (md-ts--link-button-property-segment pos)))
                 (md-ts--remove-link-face-from-region span-beg span-end)
-                (remove-text-properties
-                 span-beg span-end md-ts--link-button-properties)
+                (md-ts--remove-owned-link-button-properties-in-region
+                 span-beg span-end md-ts--link-button-residual-properties)
                 (setq pos (min limit (max (1+ pos) span-end)))))
              ((get-text-property pos 'md-ts-link-static-target)
               (pcase-let ((`(,span-beg . ,span-end)
                            (md-ts--link-button-property-segment pos)))
-                (md-ts--remove-stale-link-help-echo-properties
-                 span-beg span-end)
                 (md-ts--remove-link-face-from-region span-beg span-end)
-                (remove-text-properties
+                (md-ts--remove-owned-link-button-properties-in-region
                  span-beg span-end md-ts--link-button-residual-properties)
                 (setq pos (min limit (max (1+ pos) span-end)))))
              (t
@@ -2278,6 +2322,25 @@ left intact."
                                pos 'md-ts-display nil limit)
                               limit))))))))))
 
+(defun md-ts--remove-invisible-properties (beg end)
+  "Remove md-ts-owned `invisible' properties from BEG to END.
+Foreign `invisible' values are left intact.  Indirect buffers share
+text properties with their base buffer, so callers should skip this
+cleanup there unless they intentionally want to mutate shared text."
+  (with-silent-modifications
+    (let ((inhibit-read-only t))
+      (save-restriction
+        (widen)
+        (let ((pos (min (max beg (point-min)) (point-max)))
+              (limit (min (max end (point-min)) (point-max))))
+          (while (< pos limit)
+            (let ((next (or (next-single-property-change
+                             pos 'invisible nil limit)
+                            limit)))
+              (when (eq (get-text-property pos 'invisible) 'md-ts--markup)
+                (remove-text-properties pos next '(invisible nil)))
+              (setq pos next))))))))
+
 (defun md-ts--font-lock-unfontify-region (beg end)
   "Unfontify BEG to END and clean md-ts-owned side effects."
   (with-silent-modifications
@@ -2286,6 +2349,7 @@ left intact."
       ;; destructive md-ts side-effect cleanup there; paired refontification can
       ;; still refresh stale shared props through `md-ts--font-lock-fontify-region'.
       (unless (buffer-base-buffer)
+        (md-ts--remove-invisible-properties beg end)
         (md-ts--remove-display-properties beg end)
         (md-ts--remove-bare-link-button-properties beg end)
         (md-ts--remove-link-button-properties beg end))
@@ -3569,6 +3633,7 @@ buffers still clean old md-ts properties when the mode starts."
   (unless (buffer-base-buffer)
     (save-restriction
       (widen)
+      (md-ts--remove-invisible-properties (point-min) (point-max))
       (md-ts--remove-display-properties (point-min) (point-max))
       (md-ts--remove-bare-link-button-properties (point-min) (point-max))
       (md-ts--remove-link-button-properties (point-min) (point-max)))
@@ -3580,15 +3645,13 @@ buffers still clean old md-ts properties when the mode starts."
   (setq-local treesit-font-lock-settings md-ts--treesit-settings)
   (setq-local treesit-range-settings (md-ts--range-settings))
   (setq-local font-lock-extra-managed-props
-              (seq-uniq
-               (cons 'invisible
-                     (seq-remove
-                      (lambda (prop)
-                        (memq prop '(button category action help-echo
-                                     md-ts-link-button
-                                     md-ts-link-help-echo
-                                     md-ts-link-static-target)))
-                      font-lock-extra-managed-props))))
+              (seq-remove
+               (lambda (prop)
+                 (memq prop '(button category action help-echo invisible
+                              md-ts-link-button
+                              md-ts-link-help-echo
+                              md-ts-link-static-target)))
+               font-lock-extra-managed-props))
   (setq-local font-lock-unfontify-region-function
               #'md-ts--font-lock-unfontify-region)
   (md-ts--setup-clean-side-effect-properties)

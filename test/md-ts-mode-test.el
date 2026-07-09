@@ -188,7 +188,7 @@ NTH selects occurrence (default 1).  Link openers fail the test if called."
                   :type 'user-error)))
 
 (defconst md-ts-test--foreign-direct-interactive-props
-  '(help-echo action keymap local-map mouse-face follow-link)
+  '(help-echo action category keymap local-map mouse-face follow-link)
   "Foreign direct text properties that should block md-ts link UI.")
 
 (defun md-ts-test--foreign-direct-interactive-prop-value (prop)
@@ -196,6 +196,7 @@ NTH selects occurrence (default 1).  Link openers fail the test if called."
   (pcase prop
     ('help-echo "foreign help")
     ('action (lambda (_button) :foreign))
+    ('category 'md-ts-test-foreign-category)
     ((or 'keymap 'local-map)
      (let ((map (make-sparse-keymap)))
        (define-key map [mouse-1] #'ignore)
@@ -314,8 +315,8 @@ fail the test run."
     (should (eq t (plist-get result :md-mode-defined)))
     (should (eq t (plist-get result :md-mode-maybe-defined)))))
 
-(ert-deftest md-ts-test-mode-keeps-managed-invisible-buffer-local ()
-  "Activating `md-ts-mode' must not globally manage `invisible'."
+(ert-deftest md-ts-test-mode-keeps-invisible-unmanaged-by-font-lock ()
+  "Activating `md-ts-mode' must not ask font-lock to own `invisible'."
   (let* ((expression
           (prin1-to-string
            `(progn
@@ -338,7 +339,7 @@ fail the test run."
          (result (md-ts-test--read-batch-emacs-result expression)))
     (should (eq t (plist-get result :global-unchanged)))
     (should (eq t (plist-get result :buffer-local)))
-    (should (plist-get result :local-managed))))
+    (should-not (plist-get result :local-managed))))
 
 (ert-deftest md-ts-test-generated-autoloads-leave-global-markdown-settings-alone ()
   "Loading generated autoloads must not mutate global Markdown mode selection."
@@ -1231,7 +1232,9 @@ inline parser ranges cause the first range's faces to be dropped."
                     (unless (eq prop 'help-echo)
                       (should-not (get-text-property pos 'help-echo)))
                     (unless (eq prop 'action)
-                      (should-not (get-text-property pos 'action)))))
+                      (should-not (get-text-property pos 'action)))
+                    (unless (eq prop 'category)
+                      (should-not (get-text-property pos 'category)))))
               (kill-buffer buf))))))))
 
 (ert-deftest md-ts-test-link-multiline-button-cleanup-expands-span ()
@@ -4788,6 +4791,24 @@ inline parser ranges cause the first range's faces to be dropped."
                      (get-text-property url-beg 'face)))))
       (kill-buffer buf))))
 
+(ert-deftest md-ts-test-link-bare-cleanup-preserves-later-foreign-link-face ()
+  "Bare cleanup should not remove a later foreign `link' face addition."
+  (let ((buf (md-ts-test--fontify "Visit https://example.com/path now.\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "https://example.com/path")
+          (let ((url-beg (match-beginning 0))
+                (url-end (match-end 0)))
+            (should (get-text-property url-beg 'md-ts-bare-link-face))
+            (put-text-property url-beg url-end 'face '(link underline))
+            (md-ts--remove-bare-link-button-properties url-beg url-end)
+            (should-not (button-at url-beg))
+            (should-not (get-text-property url-beg 'md-ts-bare-link-face))
+            (should (md-ts--link-face-value-p
+                     (get-text-property url-beg 'face)))))
+      (kill-buffer buf))))
+
 (ert-deftest md-ts-test-link-bare-narrowed-same-line-multi-url-refontify ()
   "Narrowed same-line cleanup should reapply all physical-line URLs."
   (let ((base (md-ts-test--fontify
@@ -5888,8 +5909,8 @@ inline parser ranges cause the first range's faces to be dropped."
               (should called))))
       (kill-buffer buf))))
 
-(ert-deftest md-ts-test-link-wider-foreign-button-drops-stale-help ()
-  "A wider foreign text button should not keep stale md-ts help."
+(ert-deftest md-ts-test-link-wider-foreign-button-keeps-equal-help ()
+  "A wider foreign text button may own help text equal to old md-ts help."
   (let ((buf (md-ts-test--fontify "pre [link](https://example.com) post\n"))
         called)
     (unwind-protect
@@ -5904,7 +5925,8 @@ inline parser ranges cause the first range's faces to be dropped."
                            "https://example.com"))
             (make-text-button wide-beg wide-end
                               'action (lambda (_button)
-                                        (setq called t)))
+                                        (setq called t))
+                              'help-echo "https://example.com")
             (should (button-at pos))
             (should (get-text-property pos 'md-ts-link-button))
             (font-lock-flush (point-min) (point-max))
@@ -5914,8 +5936,39 @@ inline parser ranges cause the first range's faces to be dropped."
               (should-not (md-ts--link-button-p button))
               (should-not (get-text-property pos 'md-ts-link-button))
               (should-not (get-text-property pos 'md-ts-link-help-echo))
-              (should-not (plist-get (text-properties-at pos) 'help-echo))
+              (should (equal (plist-get (text-properties-at pos) 'help-echo)
+                             "https://example.com"))
               (push-button pos)
+              (should called))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-partial-foreign-action-preserved-on-refontify ()
+  "A direct foreign action inside old md-ts button text should survive."
+  (let ((buf (md-ts-test--fontify "[link](https://example.com)\n"))
+        called)
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "link")
+          (let* ((link-beg (match-beginning 0))
+                 (link-end (match-end 0))
+                 (foreign-beg (1+ link-beg))
+                 (foreign-end (1- link-end))
+                 (foreign-action (lambda (_button)
+                                   (setq called t))))
+            (should (md-ts--link-button-p (button-at link-beg)))
+            (put-text-property foreign-beg foreign-end
+                               'action foreign-action)
+            (font-lock-flush (point-min) (point-max))
+            (font-lock-ensure)
+            (should-not (button-at link-beg))
+            (let ((button (button-at foreign-beg)))
+              (should button)
+              (should-not (md-ts--link-button-p button))
+              (should (eq (button-get button 'action) foreign-action))
+              (should-not (get-text-property foreign-beg
+                                             'md-ts-link-button))
+              (push-button foreign-beg)
               (should called))))
       (kill-buffer buf))))
 
@@ -6022,6 +6075,42 @@ inline parser ranges cause the first range's faces to be dropped."
 (ert-deftest md-ts-test-link-open-at-point-map-inherits-text-mode ()
   "`md-ts-mode-map' should keep `text-mode-map' as an ancestor."
   (should (eq (keymap-parent md-ts-mode-map) text-mode-map)))
+
+(ert-deftest md-ts-test-hide-markup-unfontify-preserves-foreign-invisible ()
+  "Unfontification should remove only md-ts-owned invisible text."
+  (let ((md-ts-hide-markup t)
+        (buf (md-ts-test--fontify "# Heading\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (put-text-property (point-min) (point-max)
+                             'invisible 'foreign-hide)
+          (funcall font-lock-unfontify-region-function
+                   (point-min) (point-max))
+          (should (eq (get-text-property (point-min) 'invisible)
+                      'foreign-hide)))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-hide-markup-indirect-unfontify-preserves-base-invisible ()
+  "Indirect unfontification should not strip shared base markup hiding."
+  (let ((base (generate-new-buffer " *md-ts-test*"))
+        indirect)
+    (unwind-protect
+        (with-current-buffer base
+          (insert "# Heading\n")
+          (md-ts-mode)
+          (setq-local md-ts-hide-markup t)
+          (font-lock-ensure)
+          (should (eq (get-text-property (point-min) 'invisible)
+                      'md-ts--markup))
+          (setq indirect (make-indirect-buffer base " *md-ts-indirect*" t))
+          (with-current-buffer indirect
+            (funcall font-lock-unfontify-region-function
+                     (point-min) (point-max)))
+          (should (eq (get-text-property (point-min) 'invisible)
+                      'md-ts--markup)))
+      (when (buffer-live-p indirect)
+        (kill-buffer indirect))
+      (kill-buffer base))))
 
 (ert-deftest md-ts-test-full-reference-link ()
   "Full reference link [text][ref] should get `link' face on text."
