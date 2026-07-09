@@ -1005,10 +1005,11 @@ references cover the full Unicode range."
 
 (defun md-ts--decode-character-references (text)
   "Return TEXT with supported Markdown character references decoded.
-Escaped ampersands and unknown or malformed references stay
-literal.  Existing text properties, including Markdown escape
-provenance on unrelated characters, are preserved.  Named support
-is intentionally limited to `md-ts--named-character-reference-alist'."
+References containing Markdown-escaped characters, unknown names,
+and malformed references stay literal.  Existing text properties,
+including Markdown escape provenance on unrelated characters, are
+preserved.  Named support is intentionally limited to
+`md-ts--named-character-reference-alist'."
   (let ((start 0)
         (copy-start 0)
         (pieces nil)
@@ -1017,7 +1018,8 @@ is intentionally limited to `md-ts--named-character-reference-alist'."
       (let* ((beg (match-beginning 0))
              (end (match-end 0))
              (replacement
-              (unless (get-text-property beg md-ts--markdown-escaped-property
+              (unless (text-property-any beg end
+                                         md-ts--markdown-escaped-property t
                                          text)
                 (md-ts--character-reference-replacement text))))
         (when replacement
