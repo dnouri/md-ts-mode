@@ -1032,7 +1032,7 @@ definition."
 (defun md-ts--open-link-destination (url)
   "Open supported Markdown or bare link destination URL.
 URL may come from parsed links, images, references, autolinks, or
-bare prose links.  Use `url-mailto' for `mailto:' URIs,
+bare prose links.  Use `url-mailto' for `mailto:' targets,
 `browse-url' for other URI schemes, and `find-file' for local or
 relative paths.  Local/same-buffer fragment navigation is
 deferred: local paths with an unescaped `#fragment' open only the
@@ -2234,13 +2234,13 @@ left intact."
             "\\(?:"
             ;; Non-empty recipient list containing at least one `@', with
             ;; pragmatic URI characters so percent-escapes and query text are
-            ;; preserved as part of the explicit mailto URI.
+            ;; preserved as part of the explicit mailto form.
             "\\(?:" uri-char "*@" uri-char "+\\)"
             "\\|"
             ;; RFC-valid empty-recipient form with a query.
             "\\?" uri-char "+"
             "\\)"))
-  "Regexp matching a bare mailto URI with optional recipients and query.")
+  "Regexp matching practical bare `mailto:' forms with recipients or query.")
 
 (defconst md-ts--bare-link-closing-delimiters
   '((?\) . ?\() (?\] . ?\[) (?\} . ?\{) (?> . ?<))
@@ -2296,18 +2296,18 @@ punctuation set to trim."
       (list beg normalized-end (substring text 0 trim-length)))))
 
 (defconst md-ts--bare-mailto-uri-query-terminal-punctuation '(?. ?,)
-  "Prose punctuation trimmed from explicit mailto URIs with queries.
+  "Prose punctuation trimmed from practical bare `mailto:' forms with queries.
 Other terminal punctuation such as `!', `?', `:', and `;' is valid
 query data after the first question mark.")
 
 (defun md-ts--bare-mailto-uri-query-content-p (text)
-  "Return non-nil when mailto URI TEXT has actual query content."
+  "Return non-nil when `mailto:' form TEXT has actual query content."
   (save-match-data
     (and (string-match "\\?" text)
          (string-match-p "[[:alnum:]_=&%]" (substring text (match-end 0))))))
 
 (defun md-ts--bare-mailto-uri-normalized-match (beg end)
-  "Return normalized (BEG END TEXT) for an explicit bare mailto URI."
+  "Return normalized (BEG END TEXT) for a practical bare `mailto:' form."
   (let ((text (buffer-substring-no-properties beg end)))
     (md-ts--bare-link-normalized-match
      beg end
@@ -2406,8 +2406,8 @@ SCAN-END at most once.  CHECK-OVERLAP has the same meaning as in
   "Return non-nil when an earlier bare URL in URL-RANGES covers BEG..END.
 URL-RANGES should be the vector returned by
 `md-ts--bare-link-generic-url-ranges'.  This lets an outer generic
-URL own embedded explicit `mailto:' text, while a standalone explicit
-mailto URI can own URL-like text inside its query."
+URL own embedded explicit `mailto:' text, while a standalone practical
+bare `mailto:' form can own URL-like text inside its query."
   (let ((lo 0)
         (hi (length url-ranges))
         prior-index)
@@ -2458,7 +2458,7 @@ URL-RANGES are cached generic URL ranges used to detect outer bare URLs."
       (md-ts--bare-link-covered-by-earlier-url-p beg end url-ranges)))
 
 (defun md-ts--bare-email-in-scheme-mailto-uri-p (beg end)
-  "Return non-nil when email BEG..END is inside a scheme-prefixed mailto URI."
+  "Return non-nil if email BEG..END is inside scheme-prefixed `mailto:' text."
   (save-excursion
     (let ((case-fold-search t)
           mailto-beg found)
@@ -2478,7 +2478,7 @@ URL-RANGES are cached generic URL ranges used to detect outer bare URLs."
       found)))
 
 (defun md-ts--fontify-bare-links (beg end)
-  "Fontify bare URLs, email addresses, and `mailto:' URIs.
+  "Fontify bare URLs, email addresses, and practical `mailto:' forms.
 Operate on lines covering BEG to END."
   (pcase-let ((`(,scan-beg . ,scan-end) (md-ts--line-bounds beg end)))
     (with-silent-modifications
@@ -2857,7 +2857,7 @@ TEXT).  CHECK-OVERLAP has the same meaning as in
             (throw 'target target)))))))
 
 (defun md-ts--bare-link-target-at-point (&optional pos check-overlap)
-  "Return current valid bare URL, email, or `mailto:' URI target at POS.
+  "Return current valid bare URL, email, or `mailto:' form target at POS.
 This recomputes from buffer text and parser context instead of
 trusting possibly stale static button properties.  CHECK-OVERLAP
 has the same meaning as in `md-ts--bare-link-candidate-valid-p'."
@@ -2936,7 +2936,7 @@ Markdown-inline parser ranges and link button properties in fresh
 Supported targets include parsed Markdown links/images and
 reference-definition labels with non-empty destinations, resolved
 reference links, URI autolinks, email autolinks, bare URLs, bare
-email addresses, and explicit bare `mailto:' URIs.  If point is on
+email addresses, and practical bare `mailto:' forms.  If point is on
 buttonized link text, activate that button.  If point is on parsed
 Markdown link markup, resolve the same target.  Otherwise, fall
 back to a revalidated bare target at point.  URI fragments on
