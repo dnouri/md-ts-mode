@@ -921,48 +921,6 @@ inline parser ranges cause the first range's faces to be dropped."
   (should (equal (md-ts--link-destination-url
                   "<https://example.com/a\\*b>")
                  "https://example.com/a*b"))
-  (should (equal (md-ts--link-destination-url
-                  "https://example.com/?a&amp;b")
-                 "https://example.com/?a&b"))
-  (should (equal (md-ts--link-destination-url
-                  "https://example.com/?a&AMP;b")
-                 "https://example.com/?a&b"))
-  (should (equal (md-ts--link-destination-url
-                  "docs/file.md&#35;intro")
-                 "docs/file.md#intro"))
-  (should (equal (md-ts--link-destination-url
-                  "docs/file.md&#x23;intro")
-                 "docs/file.md#intro"))
-  (should (equal (md-ts--link-destination-url
-                  "https://example.com/?a&#38;b")
-                 "https://example.com/?a&b"))
-  (should (equal (md-ts--link-destination-url
-                  "https://example.com/?a&#x26;b")
-                 "https://example.com/?a&b"))
-  (should (equal (md-ts--link-destination-url
-                  "https://example.com/?a\\&amp;b")
-                 "https://example.com/?a&amp;b"))
-  (should (equal (md-ts--link-destination-url
-                  "https://example.com/?a&amp\\;b")
-                 "https://example.com/?a&amp;b"))
-  (should (equal (md-ts--link-destination-url
-                  "docs/file.md&\\#35;intro")
-                 "docs/file.md&#35;intro"))
-  ;; Unknown names and HTML5 names outside md-ts-mode's small named
-  ;; set are intentionally left literal; numeric references cover
-  ;; arbitrary Unicode characters without embedding a full HTML5 table.
-  (should (equal (md-ts--link-destination-url
-                  "https://example.com/?a&bogus;b")
-                 "https://example.com/?a&bogus;b"))
-  (should (equal (md-ts--link-destination-url
-                  "https://example.com/?a&copy;b")
-                 "https://example.com/?a&copy;b"))
-  (should (equal (md-ts--link-destination-url
-                  "https://example.com/?a&to;b")
-                 "https://example.com/?a&to;b"))
-  (should (equal (md-ts--link-destination-url
-                  "https://example.com/?a&#xZZ;b")
-                 "https://example.com/?a&#xZZ;b"))
   (should (equal (md-ts--link-destination-url "C:\\path")
                  "C:\\path")))
 
@@ -1006,34 +964,6 @@ inline parser ranges cause the first range's faces to be dropped."
                (lambda (dest &rest _args)
                  (setq opened dest))))
       (md-ts-test--push-button-at-search text "here"))
-    (should (equal opened url))))
-
-(ert-deftest md-ts-test-link-inline-character-reference-destination ()
-  "Inline destinations should decode supported character references."
-  (dolist (raw '("https://example.com/?a&amp;b"
-                 "https://example.com/?a&AMP;b"
-                 "https://example.com/?a&#38;b"
-                 "https://example.com/?a&#x26;b"))
-    (let ((text (format "Visit [x](%s) now.\n" raw))
-          (url "https://example.com/?a&b")
-          opened)
-      (should (equal (md-ts-test--help-echo-at-search text "x") url))
-      (cl-letf (((symbol-function 'browse-url)
-                 (lambda (dest &rest _args)
-                   (setq opened dest))))
-        (md-ts-test--push-button-at-search text "x"))
-      (should (equal opened url)))))
-
-(ert-deftest md-ts-test-link-inline-escaped-semicolon-character-reference-literal ()
-  "Inline destinations should not decode references with escaped semicolons."
-  (let ((text "Visit [x](https://example.com/?a&amp\\;b) now.\n")
-        (url "https://example.com/?a&amp;b")
-        opened)
-    (should (equal (md-ts-test--help-echo-at-search text "x") url))
-    (cl-letf (((symbol-function 'browse-url)
-               (lambda (dest &rest _args)
-                 (setq opened dest))))
-      (md-ts-test--push-button-at-search text "x"))
     (should (equal opened url))))
 
 (ert-deftest md-ts-test-link-inline-help-echo-strips-escaped-properties ()
@@ -1166,66 +1096,6 @@ inline parser ranges cause the first range's faces to be dropped."
                  (ert-fail "browse-url called for escaped local hash fragment"))))
       (md-ts-test--push-button-at-search text "notes"))
     (should (equal-including-properties opened "docs/a#b.md"))))
-
-(ert-deftest md-ts-test-link-inline-entity-keeps-escaped-hash-fragment ()
-  "Entity decoding should preserve escaped-hash fragment provenance."
-  (let ((text "Open [notes](docs/a\\#b&amp;c.md#intro) please.\n")
-        opened)
-    (should (equal (md-ts-test--help-echo-at-search text "notes")
-                   "docs/a#b&c.md#intro"))
-    (cl-letf (((symbol-function 'find-file)
-               (lambda (file &rest _args)
-                 (setq opened file)))
-              ((symbol-function 'browse-url)
-               (lambda (&rest _args)
-                 (ert-fail "browse-url called for local entity path"))))
-      (md-ts-test--push-button-at-search text "notes"))
-    (should (equal-including-properties opened "docs/a#b&c.md"))))
-
-(ert-deftest md-ts-test-link-inline-numeric-hash-entity-starts-fragment ()
-  "Numeric entity-decoded hashes are normal fragment separators."
-  (let ((text "Open [notes](docs/file.md&#35;intro) please.\n")
-        opened)
-    (should (equal (md-ts-test--help-echo-at-search text "notes")
-                   "docs/file.md#intro"))
-    (cl-letf (((symbol-function 'find-file)
-               (lambda (file &rest _args)
-                 (setq opened file)))
-              ((symbol-function 'browse-url)
-               (lambda (&rest _args)
-                 (ert-fail "browse-url called for numeric hash entity"))))
-      (md-ts-test--push-button-at-search text "notes"))
-    (should (equal opened "docs/file.md"))))
-
-(ert-deftest md-ts-test-link-inline-hex-hash-entity-starts-fragment ()
-  "Hex entity-decoded hashes are normal fragment separators."
-  (let ((text "Open [notes](docs/file.md&#x23;intro) please.\n")
-        opened)
-    (should (equal (md-ts-test--help-echo-at-search text "notes")
-                   "docs/file.md#intro"))
-    (cl-letf (((symbol-function 'find-file)
-               (lambda (file &rest _args)
-                 (setq opened file)))
-              ((symbol-function 'browse-url)
-               (lambda (&rest _args)
-                 (ert-fail "browse-url called for hex hash entity"))))
-      (md-ts-test--push-button-at-search text "notes"))
-    (should (equal opened "docs/file.md"))))
-
-(ert-deftest md-ts-test-link-inline-escaped-hash-character-reference-literal ()
-  "Inline destinations should not decode references with escaped hashes."
-  (let ((text "Open [notes](docs/file.md&\\#35;intro) please.\n")
-        opened)
-    (should (equal (md-ts-test--help-echo-at-search text "notes")
-                   "docs/file.md&#35;intro"))
-    (cl-letf (((symbol-function 'find-file)
-               (lambda (file &rest _args)
-                 (setq opened file)))
-              ((symbol-function 'browse-url)
-               (lambda (&rest _args)
-                 (ert-fail "browse-url called for escaped hash reference"))))
-      (md-ts-test--push-button-at-search text "notes"))
-    (should (equal opened "docs/file.md&#35;intro"))))
 
 (ert-deftest md-ts-test-link-inline-windows-drive-paths-use-find-file ()
   "Windows drive paths should be opened as files, not URI schemes."
@@ -1651,35 +1521,6 @@ inline parser ranges cause the first range's faces to be dropped."
        "Python docs"))
     (should (equal opened "https://python.org"))))
 
-(ert-deftest md-ts-test-link-reference-character-reference-destination ()
-  "Reference destinations should decode supported character references."
-  (dolist (raw '("https://example.com/?a&amp;b"
-                 "https://example.com/?a&AMP;b"
-                 "https://example.com/?a&#38;b"
-                 "https://example.com/?a&#x26;b"))
-    (let ((text (format "See [Doc][r].\n\n[r]: %s\n" raw))
-          (url "https://example.com/?a&b")
-          opened)
-      (should (equal (md-ts-test--help-echo-at-search text "Doc") url))
-      (cl-letf (((symbol-function 'browse-url)
-                 (lambda (dest &rest _args)
-                   (setq opened dest))))
-        (md-ts-test--push-button-at-search text "Doc"))
-      (should (equal opened url)))))
-
-(ert-deftest md-ts-test-link-reference-escaped-semicolon-character-reference-literal ()
-  "Reference destinations should not decode references with escaped semicolons."
-  (let ((text (concat "See [Doc][r].\n\n"
-                      "[r]: https://example.com/?a&amp\\;b\n"))
-        (url "https://example.com/?a&amp;b")
-        opened)
-    (should (equal (md-ts-test--help-echo-at-search text "Doc") url))
-    (cl-letf (((symbol-function 'browse-url)
-               (lambda (dest &rest _args)
-                 (setq opened dest))))
-      (md-ts-test--push-button-at-search text "Doc"))
-    (should (equal opened url))))
-
 (ert-deftest md-ts-test-link-reference-escaped-hash-local-path-opens-literal-file ()
   "Escaped hashes in reference destinations are literal filename characters."
   (let ((text (concat "See [Doc][hash].\n\n"
@@ -1695,70 +1536,6 @@ inline parser ranges cause the first range's faces to be dropped."
                  (ert-fail "browse-url called for escaped local hash"))))
       (md-ts-test--push-button-at-search text "Doc"))
     (should (equal-including-properties opened "docs/a#b.md"))))
-
-(ert-deftest md-ts-test-link-reference-entity-keeps-escaped-hash-fragment ()
-  "Entity decoding should preserve reference escaped-hash provenance."
-  (let ((text (concat "See [Doc][hash].\n\n"
-                      "[hash]: docs/a\\#b&amp;c.md#intro\n"))
-        opened)
-    (should (equal (md-ts-test--help-echo-at-search text "Doc")
-                   "docs/a#b&c.md#intro"))
-    (cl-letf (((symbol-function 'find-file)
-               (lambda (file &rest _args)
-                 (setq opened file)))
-              ((symbol-function 'browse-url)
-               (lambda (&rest _args)
-                 (ert-fail "browse-url called for reference entity path"))))
-      (md-ts-test--push-button-at-search text "Doc"))
-    (should (equal-including-properties opened "docs/a#b&c.md"))))
-
-(ert-deftest md-ts-test-link-reference-numeric-hash-entity-starts-fragment ()
-  "Numeric entity-decoded reference hashes are fragment separators."
-  (let ((text (concat "See [Doc][hash].\n\n"
-                      "[hash]: docs/file.md&#35;intro\n"))
-        opened)
-    (should (equal (md-ts-test--help-echo-at-search text "Doc")
-                   "docs/file.md#intro"))
-    (cl-letf (((symbol-function 'find-file)
-               (lambda (file &rest _args)
-                 (setq opened file)))
-              ((symbol-function 'browse-url)
-               (lambda (&rest _args)
-                 (ert-fail "browse-url called for reference hash entity"))))
-      (md-ts-test--push-button-at-search text "Doc"))
-    (should (equal opened "docs/file.md"))))
-
-(ert-deftest md-ts-test-link-reference-hex-hash-entity-starts-fragment ()
-  "Hex entity-decoded reference hashes are fragment separators."
-  (let ((text (concat "See [Doc][hash].\n\n"
-                      "[hash]: docs/file.md&#x23;intro\n"))
-        opened)
-    (should (equal (md-ts-test--help-echo-at-search text "Doc")
-                   "docs/file.md#intro"))
-    (cl-letf (((symbol-function 'find-file)
-               (lambda (file &rest _args)
-                 (setq opened file)))
-              ((symbol-function 'browse-url)
-               (lambda (&rest _args)
-                 (ert-fail "browse-url called for reference hex hash entity"))))
-      (md-ts-test--push-button-at-search text "Doc"))
-    (should (equal opened "docs/file.md"))))
-
-(ert-deftest md-ts-test-link-reference-escaped-hash-character-reference-literal ()
-  "Reference destinations should not decode references with escaped hashes."
-  (let ((text (concat "See [Doc][hash].\n\n"
-                      "[hash]: docs/file.md&\\#35;intro\n"))
-        opened)
-    (should (equal (md-ts-test--help-echo-at-search text "Doc")
-                   "docs/file.md&#35;intro"))
-    (cl-letf (((symbol-function 'find-file)
-               (lambda (file &rest _args)
-                 (setq opened file)))
-              ((symbol-function 'browse-url)
-               (lambda (&rest _args)
-                 (ert-fail "browse-url called for reference escaped hash"))))
-      (md-ts-test--push-button-at-search text "Doc"))
-    (should (equal opened "docs/file.md&#35;intro"))))
 
 (ert-deftest md-ts-test-link-reference-label-normalization ()
   "Reference labels should be whitespace-folded and simply downcased."

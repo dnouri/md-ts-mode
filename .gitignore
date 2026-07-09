@@ -12,4 +12,5 @@
 
 # Local working files
 /.cache/
+/.playwright-cli/
 /tmp/

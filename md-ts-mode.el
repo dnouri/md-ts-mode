@@ -968,90 +968,16 @@ Markdown syntax."
         (apply #'concat (nreverse (cons (substring text start) pieces)))
       text)))
 
-(defconst md-ts--character-reference-regexp
-  (concat "&\\(?:#\\([0-9]\\{1,7\\}\\)"
-          "\\|#[xX]\\([[:xdigit:]]\\{1,6\\}\\)"
-          "\\|\\([[:alpha:]][[:alnum:]]*\\)\\);")
-  "Regexp matching supported semicolon-terminated character references.")
-
-(defconst md-ts--named-character-reference-alist
-  '(("amp" . "&")
-    ("AMP" . "&")
-    ("lt" . "<")
-    ("LT" . "<")
-    ("gt" . ">")
-    ("GT" . ">")
-    ("quot" . "\"")
-    ("QUOT" . "\"")
-    ("apos" . "'"))
-  "Small named character reference set decoded in link destinations.
-This intentionally covers XML's predefined entities, plus common
-HTML uppercase variants, instead of embedding a full HTML5 table.")
-
-(defun md-ts--character-reference-codepoint-string (codepoint)
-  "Return the string represented by numeric reference CODEPOINT.
-Invalid Unicode scalar values, including NUL, become U+FFFD."
-  (if (or (and (<= 1 codepoint) (<= codepoint #xd7ff))
-          (and (<= #xe000 codepoint) (<= codepoint #x10ffff)))
-      (char-to-string codepoint)
-    (string #xfffd)))
-
-(defun md-ts--character-reference-replacement (text)
-  "Return decoded character reference at the current match in TEXT.
-Unknown named references return nil so callers can leave them
-literal.  Named decoding is intentionally limited; numeric
-references cover the full Unicode range."
-  (cond
-   ((match-beginning 1)
-    (md-ts--character-reference-codepoint-string
-     (string-to-number (match-string 1 text))))
-   ((match-beginning 2)
-    (md-ts--character-reference-codepoint-string
-     (string-to-number (match-string 2 text) 16)))
-   ((match-beginning 3)
-    (cdr (assoc (match-string 3 text)
-                md-ts--named-character-reference-alist)))))
-
-(defun md-ts--decode-character-references (text)
-  "Return TEXT with supported Markdown character references decoded.
-References containing Markdown-escaped characters, unknown names,
-and malformed references stay literal.  Existing text properties,
-including Markdown escape provenance on unrelated characters, are
-preserved.  Named support is intentionally limited to
-`md-ts--named-character-reference-alist'."
-  (let ((start 0)
-        (copy-start 0)
-        (pieces nil)
-        changed)
-    (while (string-match md-ts--character-reference-regexp text start)
-      (let* ((beg (match-beginning 0))
-             (end (match-end 0))
-             (replacement
-              (unless (text-property-any beg end
-                                         md-ts--markdown-escaped-property t
-                                         text)
-                (md-ts--character-reference-replacement text))))
-        (when replacement
-          (setq changed t)
-          (push (substring text copy-start beg) pieces)
-          (push replacement pieces)
-          (setq copy-start end))
-        (setq start end)))
-    (if changed
-        (apply #'concat (nreverse (cons (substring text copy-start) pieces)))
-      text)))
-
 (defun md-ts--link-destination-url (destination)
   "Return the URL represented by raw link DESTINATION text.
-Unwrap angle-bracket destinations, decode basic Markdown
-backslash escapes, and decode supported character references."
+Unwrap angle-bracket destinations and decode basic Markdown
+backslash escapes."
   (let ((url (if (and (> (length destination) 1)
                       (string-prefix-p "<" destination)
                       (string-suffix-p ">" destination))
                  (substring destination 1 -1)
                destination)))
-    (md-ts--decode-character-references
-     (md-ts--markdown-unescape url))))
+    (md-ts--markdown-unescape url)))
 
 (defvar-local md-ts--link-reference-definitions-cache nil
   "Cached alist of Markdown link reference definitions.

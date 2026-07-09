@@ -64,7 +64,7 @@ A [shortcut link] by itself.
 | foo  | `str` | A **foo** value |
 | bar  | *int* | A [link](url) |
 
-```sample
+```python
 def hello():
     return "world"
 ```
