@@ -11,4 +11,5 @@
 *.~undo-tree
 
 # Local working files
+/.cache/
 /tmp/

@@ -29,7 +29,7 @@ help:
 	@echo "  make check-parens   Verify balanced parentheses"
 	@echo "  make snapshot       Regenerate test/fixture-faces.eld"
 	@echo "  make perf           Run advisory link fontification benchmarks"
-	@echo "  make check          compile + lint + test (pre-commit)"
+	@echo "  make check          compile + compile-benchmark + lint + test (pre-commit)"
 	@echo "  make install-hooks  Set up git pre-commit hook"
 	@echo "  make clean          Remove .elc files"
 
@@ -122,7 +122,7 @@ perf:
 		$(BATCH) \
 		-l scripts/benchmark-document-links.el
 
-check: compile lint test
+check: compile compile-benchmark lint test
 
 install-hooks:
 	@git config core.hooksPath hooks
