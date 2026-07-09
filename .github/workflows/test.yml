@@ -55,7 +55,5 @@ jobs:
               (unless (treesit-language-available-p lang)
                 (error "Failed to install %s grammar" lang)))
             (message "All grammars installed successfully"))'
-      - name: Byte-compile
-        run: make compile
-      - name: Run tests
-        run: make test
+      - name: Check
+        run: make check
