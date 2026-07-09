@@ -355,18 +355,28 @@ When COUNT is non-nil, return link artifact counts after fontification."
       ("mixed-chat-prose" mode+font-lock
        ,(md-ts-bench--mixed-chat-prose-doc 100) 100 "threads"))))
 
+(defconst md-ts-bench--smoke-min-counts
+  '(("plain-prose-smoke" :link-buttons 0 :bare-link-props 0 :static-targets 0)
+    ("bare-links-smoke" :link-buttons 6 :bare-link-props 6 :static-targets 6)
+    ("long-line-one-char-jit-smoke" :link-buttons 7 :bare-link-props 6 :static-targets 6)
+    ("parsed-refs-smoke" :link-buttons 4)
+    ("mixed-chat-prose-smoke" :link-buttons 16 :bare-link-props 10 :static-targets 10))
+  "Minimum link artifact counts expected for deterministic smoke fixtures.")
+
 (defun md-ts-bench--validate-smoke-counts (case-name counts)
-  "Signal an error in smoke mode if CASE-NAME did no expected link work."
+  "Signal an error in smoke mode if CASE-NAME misses expected link work."
   (when md-ts-bench-smoke
-    (cond
-     ((string-match-p "\\`plain-prose" case-name)
-      nil)
-     ((string-match-p "bare-links\\|long-line\\|mixed-chat" case-name)
-      (unless (> (plist-get counts :bare-link-props) 0)
-        (error "Smoke case %s produced no bare-link props" case-name)))
-     ((string-match-p "parsed-refs" case-name)
-      (unless (> (plist-get counts :link-buttons) 0)
-        (error "Smoke case %s produced no md-ts link buttons" case-name))))))
+    (let ((minimums (cdr (assoc case-name md-ts-bench--smoke-min-counts))))
+      (unless minimums
+        (error "Smoke case %s has no expected count entry" case-name))
+      (while minimums
+        (let* ((property (pop minimums))
+               (minimum (pop minimums))
+               (actual (or (plist-get counts property) 0)))
+          (unless (>= actual minimum)
+            (error (concat "Smoke case %s expected %s >= %d, got %d "
+                           "(counts=%S)")
+                   case-name property minimum actual counts)))))))
 
 (defun md-ts-bench-run ()
   "Run advisory document-link fontification benchmarks."
@@ -396,8 +406,12 @@ When COUNT is non-nil, return link artifact counts after fontification."
                                         counts times))))
         (md-ts-bench--log "DONE commit=%s"
                           (md-ts-bench--git-output "rev-parse" "--short" "HEAD")))
-    (md-ts-bench--log
-     "SKIP reason=missing-markdown-tree-sitter-grammar hint=set-MD_TS_TREE_SITTER_DIR-or-install-grammars")))
+    (let ((message (concat "missing Markdown tree-sitter grammars; "
+                           "set MD_TS_TREE_SITTER_DIR or install grammars")))
+      (if md-ts-bench-smoke
+          (error "Perf smoke failed: %s" message)
+        (md-ts-bench--log
+         "SKIP reason=missing-markdown-tree-sitter-grammar hint=set-MD_TS_TREE_SITTER_DIR-or-install-grammars")))))
 
 (md-ts-bench-run)
 

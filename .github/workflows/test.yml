@@ -57,7 +57,11 @@ jobs:
             (message "All grammars installed successfully"))'
       - name: Byte-compile
         run: make compile
+      - name: Byte-compile tests
+        run: make compile-tests
       - name: Byte-compile benchmark
         run: make compile-benchmark
+      - name: Benchmark smoke
+        run: make perf-smoke
       - name: Run tests
         run: make test
