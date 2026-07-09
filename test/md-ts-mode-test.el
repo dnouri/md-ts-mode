@@ -3085,6 +3085,50 @@ inline parser ranges cause the first range's faces to be dropped."
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
 
+(ert-deftest md-ts-test-link-bare-mailto-invalid-long-candidate-smoke ()
+  "Invalid long `mailto:' candidates should stay plain without regexp blowups."
+  (with-temp-buffer
+    (insert "mailto:" (make-string 400000 ?a))
+    (goto-char (point-min))
+    (should (re-search-forward md-ts--bare-mailto-uri-regexp nil t))
+    (should (= (match-end 0)
+               (+ (point-min) md-ts--bare-mailto-uri-prefix-length))))
+  (let* ((tail (make-string 50000 ?a))
+         (email "person@example.com")
+         (text (concat "Contact mailto:" tail " " email "\n"))
+         (normalized-count 0)
+         (normalize-original
+          (symbol-function 'md-ts--bare-mailto-uri-normalized-match))
+         buf)
+    (unwind-protect
+        (progn
+          (setq buf (generate-new-buffer " *md-ts-test*"))
+          (with-current-buffer buf
+            (insert text)
+            (md-ts-mode)
+            (cl-letf (((symbol-function 'md-ts--bare-mailto-uri-normalized-match)
+                       (lambda (&rest args)
+                         (setq normalized-count (1+ normalized-count))
+                         (apply normalize-original args))))
+              (md-ts--fontify-bare-links (point-min) (point-max)))
+            (should (= normalized-count 0))
+            (goto-char (point-min))
+            (search-forward "mailto:")
+            (let ((pos (match-beginning 0)))
+              (should-not (button-at pos))
+              (should-not (get-text-property pos 'md-ts-link-static-target))
+              (should-not (get-text-property pos 'md-ts-bare-link-face))
+              (should-not (md-ts--bare-link-target-at-point pos)))
+            (search-forward email)
+            (let ((pos (match-beginning 0)))
+              (should (button-at pos))
+              (should (equal (get-text-property pos 'md-ts-link-static-target)
+                             (concat "mailto:" email)))
+              (should (equal (md-ts--bare-link-target-at-point pos)
+                             (concat "mailto:" email))))))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
 (ert-deftest md-ts-test-link-bare-email-scheme-mailto-long-line-cache ()
   "Many emails should share one scheme-prefixed mailto range cache."
   (let* ((count 64)
@@ -4279,6 +4323,57 @@ inline parser ranges cause the first range's faces to be dropped."
                   (replace-match replacement t t)
                   (md-ts-test--fontify-line-at line-pos))
                 (md-ts-test--assert-no-bare-button-at-search target))
+            (kill-buffer buf)))))))
+
+(ert-deftest md-ts-test-link-bare-regional-newline-before-opener-cleans-unsafe ()
+  "Newline insertion before opener lines should clear newly unsafe bare UI."
+  (dolist (case '(("fenced code" "before```\nhttps://fence-newline.example/path\n```\n"
+                   "https://fence-newline.example/path")
+                  ("HTML block" "before<div>\nhttps://html-newline.example/path\n</div>\n"
+                   "https://html-newline.example/path")))
+    (pcase-let ((`(,label ,text ,target) case))
+      (dolist (refontify '(inserted-newline previous-eol opener-bol))
+        (ert-info ((format "checking %s via %s" label refontify))
+          (let ((buf (md-ts-test--fontify text)))
+            (unwind-protect
+                (with-current-buffer buf
+                  (md-ts-test--assert-bare-button-opens-at-search target)
+                  (goto-char (point-min))
+                  (search-forward "before")
+                  (let ((edit-beg (point)))
+                    (insert "\n")
+                    (pcase refontify
+                      ('inserted-newline
+                       (funcall font-lock-fontify-region-function
+                                edit-beg (1+ edit-beg) nil))
+                      ('previous-eol
+                       (funcall font-lock-fontify-region-function
+                                edit-beg edit-beg nil))
+                      ('opener-bol
+                       (funcall font-lock-fontify-region-function
+                                (1+ edit-beg) (1+ edit-beg) nil))))
+                  (md-ts-test--assert-no-bare-button-at-search target))
+              (kill-buffer buf))))))))
+
+(ert-deftest md-ts-test-link-bare-regional-delete-newline-before-opener-buttonizes-prose ()
+  "Deleting newlines before opener lines should rescan newly prose bodies."
+  (dolist (case '(("fenced code" "before\n```\nhttps://fence-delete.example/path\n```\n"
+                   "https://fence-delete.example/path")
+                  ("HTML block" "before\n<div>\nhttps://html-delete.example/path\n</div>\n"
+                   "https://html-delete.example/path")))
+    (pcase-let ((`(,label ,text ,target) case))
+      (ert-info ((format "checking %s" label))
+        (let ((buf (md-ts-test--fontify text)))
+          (unwind-protect
+              (with-current-buffer buf
+                (md-ts-test--assert-no-bare-button-at-search target)
+                (goto-char (point-min))
+                (search-forward "before")
+                (let ((edit-beg (point)))
+                  (delete-char 1)
+                  (funcall font-lock-fontify-region-function
+                           edit-beg edit-beg nil))
+                (md-ts-test--assert-bare-button-opens-at-search target))
             (kill-buffer buf)))))))
 
 (ert-deftest md-ts-test-link-bare-edit-to-autolink-clears-static-target ()
