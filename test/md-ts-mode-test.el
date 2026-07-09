@@ -261,6 +261,30 @@ where the upstream shadowing bug is fixed."
     (and (= 1 (length settings))
          (eq (nth 4 (car settings)) #'treesit-range-fn-exclude-children))))
 
+(defvar md-ts-test--python-ts-mode-font-lock-compatible :unknown
+  "Cached compatibility result for probing `python-ts-mode' font lock.")
+
+(defun md-ts-test--python-ts-mode-font-lock-compatible-p ()
+  "Return non-nil if `python-ts-mode' font-lock queries work here.
+This probes a tiny Python buffer so tests that require embedded
+Python fontification can skip when the current tree-sitter runtime
+rejects upstream Python queries.  Unexpected non-query errors still
+fail the test run."
+  (when (eq md-ts-test--python-ts-mode-font-lock-compatible :unknown)
+    (setq md-ts-test--python-ts-mode-font-lock-compatible
+          (and (fboundp 'python-ts-mode)
+               (treesit-language-available-p 'python)
+               (condition-case nil
+                   (let ((inhibit-message t)
+                         (message-log-max nil))
+                     (with-temp-buffer
+                       (insert "def foo():\n    return 42\n")
+                       (python-ts-mode)
+                       (font-lock-ensure)
+                       t))
+                 (treesit-query-error nil)))))
+  md-ts-test--python-ts-mode-font-lock-compatible)
+
 ;;; Font-lock correctness tests
 
 (ert-deftest md-ts-test-require-leaves-global-markdown-settings-alone ()
@@ -650,7 +674,7 @@ This allows themes to provide their own heading heights."
 (ert-deftest md-ts-test-fenced-code-block-with-language ()
   "Fenced code block with language should get `md-ts-code' face on body."
   (should (md-ts-test--has-face
-           "```python\nprint('hi')\n```\n" "print" 'md-ts-code)))
+           "```sample\nprint('hi')\n```\n" "print" 'md-ts-code)))
 
 (ert-deftest md-ts-test-indented-code-block-no-delimiter ()
   "Indented code block continuation indent must not get delimiter face."
@@ -6309,18 +6333,18 @@ inline parser ranges cause the first range's faces to be dropped."
 
 (ert-deftest md-ts-test-hide-markup-fenced-code-language ()
   "With hide-markup, the language tag is hidden along with fences.
-When code is syntax-highlighted, the language label is redundant."
+Language labels are markup whether or not an embedded grammar is active."
   (let ((md-ts-hide-markup t))
     (should (eq (md-ts-test--invisible-at
-                 "```python\nprint('hi')\n```\n"
-                 "python")
+                 "```sample\nprint('hi')\n```\n"
+                 "sample")
                 'md-ts--markup))))
 
 (ert-deftest md-ts-test-hide-markup-fenced-code-delimiter ()
   "With hide-markup, fenced code block delimiters are hidden."
   (let ((md-ts-hide-markup t))
     (should (eq (md-ts-test--invisible-at
-                 "```python\nprint('hi')\n```\n"
+                 "```sample\nprint('hi')\n```\n"
                  "```")
                 'md-ts--markup))))
 
@@ -6427,19 +6451,19 @@ When code is syntax-highlighted, the language label is redundant."
 The entire opening line (``` + language + newline) and closing line
 (``` + newline) should be invisible, leaving no phantom blank lines."
   (let* ((md-ts-hide-markup t)
-         (text "```python\nprint('hi')\n```\n")
+         (text "```sample\nprint('hi')\n```\n")
          (buf (md-ts-test--fontify text)))
     (unwind-protect
         (with-current-buffer buf
-          ;; Newline after opening fence line (```python\n)
-          ;; Position of \n is right after "```python" = position 10
+          ;; Newline after opening fence line (```sample\n)
+          ;; Position of \n is right after "```sample" = position 10
           (should (eq (get-text-property 10 'invisible) 'md-ts--markup))
           ;; Code body should NOT be invisible
           (goto-char (point-min))
           (search-forward "print")
           (should-not (get-text-property (match-beginning 0) 'invisible))
           ;; Newline after closing fence (```\n)
-          ;; text = "```python\nprint('hi')\n```\n"
+          ;; text = "```sample\nprint('hi')\n```\n"
           ;;         1234567890 1234567890123 456 7
           ;; closing ``` starts at 23, newline at 26
           (let ((closing-newline (1- (point-max))))
@@ -7189,7 +7213,7 @@ Additional rules appear when html/yaml/toml grammars are installed."
 
 (ert-deftest md-ts-test-code-block-local-parser ()
   "Python code block should get a local python parser."
-  (skip-unless (treesit-language-available-p 'python))
+  (skip-unless (md-ts-test--python-ts-mode-font-lock-compatible-p))
   (let ((buf (generate-new-buffer " *md-ts-test-cblp*")))
     (unwind-protect
         (with-current-buffer buf
@@ -7208,7 +7232,7 @@ Additional rules appear when html/yaml/toml grammars are installed."
   "Python code block content should have python-specific font-lock faces.
 The face property is a list because `md-ts-code' is appended as a
 base layer beneath the language-specific faces."
-  (skip-unless (treesit-language-available-p 'python))
+  (skip-unless (md-ts-test--python-ts-mode-font-lock-compatible-p))
   (let ((buf (generate-new-buffer " *md-ts-test-cbf*")))
     (unwind-protect
         (with-current-buffer buf
