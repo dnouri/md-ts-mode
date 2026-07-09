@@ -850,19 +850,28 @@ their own scaling."
 (defun md-ts--fontify-delimiter (node override start end &rest _)
   "Fontify delimiter NODE and optionally hide its markup.
 OVERRIDE, START, and END are passed to `treesit-fontify-with-override'."
-  (treesit-fontify-with-override
-   (treesit-node-start node) (treesit-node-end node)
-   'md-ts-delimiter override start end)
-  (when md-ts-hide-markup
-    (let ((hide-end (treesit-node-end node))
-          (type (treesit-node-type node)))
-      ;; For ATX heading markers, also hide the trailing space.
-      ;; For setext underlines, also hide the trailing newline.
-      (when (or (string-prefix-p "atx_h" type)
-                (string-prefix-p "setext_h" type))
-        (setq hide-end (min (1+ hide-end) (point-max))))
-      (put-text-property (treesit-node-start node) hide-end
-                         'invisible 'md-ts--markup))))
+  (let ((node-start (treesit-node-start node))
+        (node-end (treesit-node-end node))
+        (type (treesit-node-type node)))
+    ;; Some Markdown constructs (for example list items containing blockquotes)
+    ;; produce pure-whitespace `block_continuation' nodes.  They are structural
+    ;; indentation, not visible quote markers.  Keep this filter in Lisp rather
+    ;; than in the tree-sitter query so runtimes before and after 0.26 compile
+    ;; the font-lock rules.
+    (unless (and (string= type "block_continuation")
+                 (or (>= node-start node-end)
+                     (not (eq (char-after node-start) ?>))))
+      (treesit-fontify-with-override
+       node-start node-end 'md-ts-delimiter override start end)
+      (when md-ts-hide-markup
+        (let ((hide-end node-end))
+          ;; For ATX heading markers, also hide the trailing space.
+          ;; For setext underlines, also hide the trailing newline.
+          (when (or (string-prefix-p "atx_h" type)
+                    (string-prefix-p "setext_h" type))
+            (setq hide-end (min (1+ hide-end) (point-max))))
+          (put-text-property node-start hide-end
+                             'invisible 'md-ts--markup))))))
 
 (defun md-ts--fontify-thematic-break (node override start end &rest _)
   "Fontify thematic break NODE as a horizontal rule.
@@ -1455,8 +1464,7 @@ font-lock rule to avoid interfering with embedded language faces."
    :override 'prepend
    '((block_quote) @md-ts-block-quote
      (block_quote_marker) @md-ts--fontify-delimiter
-     ((block_continuation) @md-ts--fontify-delimiter
-      (:match "^>" @md-ts--fontify-delimiter))
+     (block_continuation) @md-ts--fontify-delimiter
      (fenced_code_block) @md-ts--fontify-fenced-code-block)
 
    :language 'markdown-inline
