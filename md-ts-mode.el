@@ -525,13 +525,14 @@ reuses them.  Must run as :before advice on `treesit-update-ranges'."
             (end (or end (point-max))))
         (dolist (ov (overlays-in beg end))
           (when-let* ((old-parser (overlay-get ov 'treesit-parser))
-                      ((treesit-parser-language old-parser))
                       (ov-tick (overlay-get ov 'treesit-parser-ov-timestamp)))
-            (when (not (eql ov-tick tick))
-              (when-let* ((new-parser
-                           (md-ts--recreate-local-parser ov old-parser)))
-                (treesit-parser-set-included-ranges
-                 new-parser `((,(overlay-start ov) . ,(overlay-end ov)))))))))))
+            (if (not (md-ts--font-lock-parser-language old-parser))
+                (delete-overlay ov)
+              (when (not (eql ov-tick tick))
+                (when-let* ((new-parser
+                             (md-ts--recreate-local-parser ov old-parser)))
+                  (treesit-parser-set-included-ranges
+                   new-parser `((,(overlay-start ov) . ,(overlay-end ov))))))))))))
   (advice-add 'treesit-update-ranges :before
               'md-ts--refresh-local-parsers))
 
@@ -1946,6 +1947,10 @@ all font-lock state."
               (md-ts--region-has-markdown-fence-p beg end)
               (md-ts--region-touches-html-block-boundary-p
                beg end newline-insert))
+      (save-restriction
+        (widen)
+        (md-ts--font-lock-push-dirty-side-effect-bounds
+         (point-min) (point-max)))
       (md-ts--flush-all-font-lock)))
   (setq md-ts--link-reference-definition-change-p nil))
 
@@ -3256,12 +3261,28 @@ Indirect buffers share text properties, so this list is stored and
 consumed on the base buffer when one exists.  Each element is a
 cons of markers in shared buffer coordinates.")
 
-(defvar-local md-ts--font-lock-last-fontified-tick nil
-  "Buffer modified tick from the last md-ts fontification pass.")
+(defvar-local md-ts--font-lock-dirty-side-effect-bounds nil
+  "Changed bounds that still require shared side-effect cleanup.
+These ranges are stored on the base buffer when one exists, just
+like `md-ts--font-lock-stale-side-effect-bounds'.  Fontifying an
+intersecting region must clean md-ts-owned parsed-link and
+hide-markup text properties even if another region already updated
+the family fontification tick.")
 
 (defun md-ts--font-lock-state-buffer ()
   "Return the buffer that owns shared font-lock side-effect state."
   (or (buffer-base-buffer) (current-buffer)))
+
+(defun md-ts--font-lock-marker-range (beg end)
+  "Return a shared-state marker range for BEG to END."
+  (with-current-buffer (md-ts--font-lock-state-buffer)
+    (cons (copy-marker beg)
+          (copy-marker end t))))
+
+(defun md-ts--font-lock-clear-marker-range (range)
+  "Detach the markers in RANGE."
+  (set-marker (car range) nil)
+  (set-marker (cdr range) nil))
 
 (defun md-ts--font-lock-stale-side-effect-bounds ()
   "Return shared stale side-effect bounds for the current buffer family."
@@ -3275,20 +3296,27 @@ cons of markers in shared buffer coordinates.")
 
 (defun md-ts--font-lock-push-stale-side-effect-bounds (beg end)
   "Record shared stale side-effect bounds BEG..END."
-  (with-current-buffer (md-ts--font-lock-state-buffer)
-    (push (cons (copy-marker beg)
-                (copy-marker end t))
-          md-ts--font-lock-stale-side-effect-bounds)))
+  (when (< beg end)
+    (with-current-buffer (md-ts--font-lock-state-buffer)
+      (push (md-ts--font-lock-marker-range beg end)
+            md-ts--font-lock-stale-side-effect-bounds))))
 
-(defun md-ts--font-lock-last-fontified-tick ()
-  "Return the shared last-fontified modified tick."
+(defun md-ts--font-lock-dirty-side-effect-bounds ()
+  "Return shared dirty side-effect bounds for the current buffer family."
   (with-current-buffer (md-ts--font-lock-state-buffer)
-    md-ts--font-lock-last-fontified-tick))
+    md-ts--font-lock-dirty-side-effect-bounds))
 
-(defun md-ts--font-lock-set-last-fontified-tick (tick)
-  "Set the shared last-fontified modified TICK."
+(defun md-ts--font-lock-set-dirty-side-effect-bounds (bounds)
+  "Set shared dirty side-effect BOUNDS for the current buffer family."
   (with-current-buffer (md-ts--font-lock-state-buffer)
-    (setq md-ts--font-lock-last-fontified-tick tick)))
+    (setq md-ts--font-lock-dirty-side-effect-bounds bounds)))
+
+(defun md-ts--font-lock-push-dirty-side-effect-bounds (beg end)
+  "Record changed bounds BEG..END needing shared side-effect cleanup."
+  (when (< beg end)
+    (with-current-buffer (md-ts--font-lock-state-buffer)
+      (push (md-ts--font-lock-marker-range beg end)
+            md-ts--font-lock-dirty-side-effect-bounds))))
 
 (defconst md-ts--font-lock-side-effect-properties
   '(md-ts-link-button md-ts-link-help-echo md-ts-link-static-target
@@ -3487,15 +3515,40 @@ or end line is touched by FONTIFY-BEG..FONTIFY-END."
             (range-end (marker-position (cdr range))))
         (cond
          ((or (not range-beg) (not range-end) (>= range-beg range-end))
-          (set-marker (car range) nil)
-          (set-marker (cdr range) nil))
+          (md-ts--font-lock-clear-marker-range range))
          ((md-ts--regions-intersect-p beg end range-beg range-end)
           (push (cons range-beg range-end) bounds)
-          (set-marker (car range) nil)
-          (set-marker (cdr range) nil))
+          (md-ts--font-lock-clear-marker-range range))
          (t
           (push range keep)))))
     (md-ts--font-lock-set-stale-side-effect-bounds (nreverse keep))
+    (nreverse bounds)))
+
+(defun md-ts--font-lock-consume-dirty-side-effect-bounds (beg end)
+  "Return dirty cleanup bounds intersecting BEG..END.
+Only the intersecting portion is consumed, leaving any not-yet
+fontified residue dirty for later regional fontification."
+  (let (bounds keep)
+    (dolist (range (md-ts--font-lock-dirty-side-effect-bounds))
+      (let ((range-beg (marker-position (car range)))
+            (range-end (marker-position (cdr range))))
+        (cond
+         ((or (not range-beg) (not range-end) (>= range-beg range-end))
+          (md-ts--font-lock-clear-marker-range range))
+         ((md-ts--regions-intersect-p beg end range-beg range-end)
+          (let ((clean-beg (max beg range-beg))
+                (clean-end (min end range-end)))
+            (push (cons clean-beg clean-end) bounds)
+            (when (< range-beg clean-beg)
+              (push (md-ts--font-lock-marker-range range-beg clean-beg)
+                    keep))
+            (when (< clean-end range-end)
+              (push (md-ts--font-lock-marker-range clean-end range-end)
+                    keep))
+            (md-ts--font-lock-clear-marker-range range)))
+         (t
+          (push range keep)))))
+    (md-ts--font-lock-set-dirty-side-effect-bounds (nreverse keep))
     (nreverse bounds)))
 
 (defun md-ts--font-lock-record-stale-node-bounds
@@ -3540,6 +3593,16 @@ touched by the change bounds."
         (md-ts--font-lock-record-stale-node-bounds
          fontify-beg fontify-end
          md-ts--font-lock-bare-unsafe-context-node-queries t)))))
+
+(defun md-ts--font-lock-record-dirty-side-effect-bounds (beg end &rest _)
+  "Record changed line bounds BEG..END for later side-effect cleanup."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (pcase-let ((`(,fontify-beg . ,fontify-end)
+                   (md-ts--font-lock-context-line-fontify-bounds beg end)))
+        (md-ts--font-lock-push-dirty-side-effect-bounds
+         fontify-beg fontify-end)))))
 
 (defun md-ts--font-lock-expand-bounds-for-side-effects (beg end)
   "Expand BEG..END to cover multi-line callback side-effect nodes.
@@ -3597,19 +3660,18 @@ LOUDLY is passed to `treesit-font-lock-fontify-region'.  Return
 jit-lock bounds for the expanded physical lines fontified and bare-scanned."
   (pcase-let ((`(,fontify-beg . ,fontify-end)
                (md-ts--font-lock-expand-bounds-for-side-effects beg end)))
-    (let* ((tick (buffer-chars-modified-tick))
-           (stale (not (eql tick (md-ts--font-lock-last-fontified-tick)))))
+    (let ((dirty (md-ts--font-lock-consume-dirty-side-effect-bounds
+                  fontify-beg fontify-end)))
       (save-restriction
         (widen)
         (md-ts--remove-display-properties fontify-beg fontify-end)
-        (when (and (buffer-base-buffer) stale)
+        (when dirty
           (md-ts--remove-invisible-properties fontify-beg fontify-end)
           (md-ts--remove-parsed-link-button-properties fontify-beg fontify-end))
         (md-ts--font-lock-prune-invalid-local-parsers fontify-beg fontify-end)
         (md-ts--with-base-buffer-widened
           (treesit-font-lock-fontify-region fontify-beg fontify-end loudly)))
       (md-ts--fontify-bare-links fontify-beg fontify-end)
-      (md-ts--font-lock-set-last-fontified-tick tick)
       `(jit-lock-bounds ,fontify-beg . ,fontify-end))))
 
 (defun md-ts--link-target-at-point (&optional pos)
@@ -3829,7 +3891,8 @@ buffers still clean old md-ts properties when the mode starts."
       (md-ts--remove-display-properties (point-min) (point-max))
       (md-ts--remove-bare-link-button-properties (point-min) (point-max))
       (md-ts--remove-link-button-properties (point-min) (point-max)))
-    (md-ts--font-lock-set-stale-side-effect-bounds nil)))
+    (md-ts--font-lock-set-stale-side-effect-bounds nil)
+    (md-ts--font-lock-set-dirty-side-effect-bounds nil)))
 
 (defun md-ts-setup ()
   "Setup treesit for `md-ts-mode'."
@@ -3848,9 +3911,13 @@ buffers still clean old md-ts properties when the mode starts."
               #'md-ts--font-lock-unfontify-region)
   (md-ts--setup-clean-side-effect-properties)
   (add-hook 'before-change-functions
+            #'md-ts--font-lock-record-dirty-side-effect-bounds nil t)
+  (add-hook 'before-change-functions
             #'md-ts--font-lock-record-stale-side-effect-bounds nil t)
   (add-hook 'before-change-functions
             #'md-ts--before-change-check-link-reference-definition nil t)
+  (add-hook 'after-change-functions
+            #'md-ts--font-lock-record-dirty-side-effect-bounds nil t)
   (add-hook 'after-change-functions
             #'md-ts--after-change-flush-link-reference-links nil t)
 

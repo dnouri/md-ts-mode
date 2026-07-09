@@ -4800,6 +4800,43 @@ inline parser ranges cause the first range's faces to be dropped."
         (kill-buffer indirect))
       (kill-buffer base))))
 
+(ert-deftest md-ts-test-link-indirect-edit-cleans-stale-parsed-link-after-clean-region ()
+  "Indirect edits should clean parsed-link UI after unrelated fontification."
+  (let ((base (md-ts-test--fontify
+               "Clean line before.\nSee [Doc](https://example.com/doc) now.\n"))
+        indirect doc-marker)
+    (unwind-protect
+        (progn
+          (with-current-buffer base
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (setq doc-marker (copy-marker (match-beginning 0)))
+            (should (md-ts--link-button-p (button-at doc-marker)))
+            (should (equal (get-text-property doc-marker 'help-echo)
+                           "https://example.com/doc")))
+          (setq indirect (make-indirect-buffer base " *md-ts-indirect*" t))
+          (with-current-buffer indirect
+            (md-ts-mode)
+            (goto-char (1- (marker-position doc-marker)))
+            (delete-char 1)
+            (goto-char (point-min))
+            (funcall font-lock-fontify-region-function
+                     (line-beginning-position) (line-end-position) nil)
+            (goto-char (marker-position doc-marker))
+            (funcall font-lock-fontify-region-function
+                     (line-beginning-position) (line-end-position) nil))
+          (with-current-buffer base
+            (let ((doc-pos (marker-position doc-marker)))
+              (should-not (button-at doc-pos))
+              (dolist (prop '(button category action help-echo
+                                     md-ts-link-button
+                                     md-ts-link-help-echo
+                                     md-ts-link-static-target))
+                (should-not (get-text-property doc-pos prop))))))
+      (when (buffer-live-p indirect)
+        (kill-buffer indirect))
+      (kill-buffer base))))
+
 (ert-deftest md-ts-test-link-bare-indirect-edit-base-cleans-stale-multiline-link ()
   "Stale multiline bounds recorded in an indirect buffer are shared."
   (let ((base (md-ts-test--fontify "[first\nsecond](https://parsed.example)\n"))
@@ -6317,6 +6354,41 @@ inline parser ranges cause the first range's faces to be dropped."
           (search-forward "Heading")
           (should (eq (get-text-property (match-beginning 0) 'invisible)
                       'foreign-hide)))
+      (when (buffer-live-p indirect)
+        (kill-buffer indirect))
+      (kill-buffer base))))
+
+(ert-deftest md-ts-test-hide-markup-indirect-edit-cleans-stale-after-clean-region ()
+  "Indirect edits should clean stale invisibility after unrelated fontification."
+  (let ((base (generate-new-buffer " *md-ts-test*"))
+        indirect)
+    (unwind-protect
+        (with-current-buffer base
+          (insert "# Heading\n\nClean line.\n")
+          (md-ts-mode)
+          (setq-local md-ts-hide-markup t)
+          (font-lock-ensure)
+          (should (eq (get-text-property (point-min) 'invisible)
+                      'md-ts--markup))
+          (should (eq (get-text-property (1+ (point-min)) 'invisible)
+                      'md-ts--markup))
+          (setq indirect (make-indirect-buffer base " *md-ts-indirect*" t))
+          (with-current-buffer indirect
+            (goto-char (point-min))
+            (delete-char 1)
+            (insert "X")
+            (search-forward "Clean line.")
+            (funcall font-lock-fontify-region-function
+                     (line-beginning-position) (line-end-position) nil)
+            (goto-char (point-min))
+            (funcall font-lock-fontify-region-function
+                     (line-beginning-position) (line-end-position) nil))
+          (should-not (md-ts-test--invisible-includes-p
+                       (get-text-property (point-min) 'invisible)
+                       'md-ts--markup))
+          (should-not (md-ts-test--invisible-includes-p
+                       (get-text-property (1+ (point-min)) 'invisible)
+                       'md-ts--markup)))
       (when (buffer-live-p indirect)
         (kill-buffer indirect))
       (kill-buffer base))))
