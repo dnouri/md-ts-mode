@@ -1120,6 +1120,65 @@ inline parser ranges cause the first range's faces to be dropped."
               (should-not (get-text-property pos prop)))))
       (kill-buffer buf))))
 
+(ert-deftest md-ts-test-link-cleanup-preserves-foreign-direct-interactive-props ()
+  "Stale md-ts button cleanup should keep foreign direct UI props."
+  (let ((buf (md-ts-test--fontify "[link](https://example.com)\n"))
+        (keymap (make-sparse-keymap)))
+    (unwind-protect
+        (with-current-buffer buf
+          (define-key keymap [mouse-1] #'ignore)
+          (goto-char (point-min))
+          (search-forward "link")
+          (let ((pos (match-beginning 0))
+                (end (match-end 0)))
+            (should (md-ts--link-button-p (button-at pos)))
+            (put-text-property pos end 'help-echo "foreign help")
+            (put-text-property pos end 'keymap keymap)
+            (put-text-property pos end 'mouse-face 'highlight)
+            (put-text-property pos end 'follow-link t)
+            (md-ts--remove-link-button-properties pos end)
+            (should-not (button-at pos))
+            (should-not (get-text-property pos 'md-ts-link-button))
+            (should-not (get-text-property pos 'md-ts-link-help-echo))
+            (should (equal (get-text-property pos 'help-echo)
+                           "foreign help"))
+            (should (eq (get-text-property pos 'keymap) keymap))
+            (should (eq (get-text-property pos 'mouse-face) 'highlight))
+            (should (get-text-property pos 'follow-link))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-foreign-direct-interactive-props-prevent-fontification ()
+  "Direct non-button UI props should keep md-ts from overwriting them."
+  (dolist (case '((parsed "[link](https://example.com)\n" "link")
+                  (bare "Visit https://example.com now.\n"
+                        "https://example.com")))
+    (pcase-let ((`(,label ,text ,search) case))
+      (ert-info ((format "%s link" label))
+        (let ((buf (generate-new-buffer " *md-ts-test*"))
+              (keymap (make-sparse-keymap))
+              (action (lambda (_button) :foreign)))
+          (unwind-protect
+              (with-current-buffer buf
+                (insert text)
+                (goto-char (point-min))
+                (search-forward search)
+                (let ((pos (match-beginning 0))
+                      (end (match-end 0)))
+                  (define-key keymap [mouse-1] #'ignore)
+                  (put-text-property pos end 'help-echo "foreign help")
+                  (put-text-property pos end 'keymap keymap)
+                  (put-text-property pos end 'action action)
+                  (md-ts-mode)
+                  (font-lock-ensure)
+                  (should-not (button-at pos))
+                  (should-not (get-text-property pos 'md-ts-link-button))
+                  (should-not (get-text-property pos 'md-ts-link-help-echo))
+                  (should (equal (get-text-property pos 'help-echo)
+                                 "foreign help"))
+                  (should (eq (get-text-property pos 'keymap) keymap))
+                  (should (eq (get-text-property pos 'action) action))))
+            (kill-buffer buf)))))))
+
 (ert-deftest md-ts-test-link-multiline-button-cleanup-expands-span ()
   "Partial unfontification should clean a whole md-ts multiline button."
   (let ((buf (md-ts-test--fontify
@@ -3383,6 +3442,30 @@ inline parser ranges cause the first range's faces to be dropped."
               (should-not (get-text-property pos prop)))
             (push-button pos)
             (should called)))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-bare-categoryless-button-overlay-does-not-block-fontification ()
+  "A category-less `button' overlay should not suppress bare link UI."
+  (let ((buf (generate-new-buffer " *md-ts-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "Visit https://example.com now.\n")
+          (goto-char (point-min))
+          (search-forward "https://example.com")
+          (let* ((pos (match-beginning 0))
+                 (end (match-end 0))
+                 (overlay (make-overlay pos end)))
+            (overlay-put overlay 'button t)
+            (overlay-put overlay 'help-echo "overlay help")
+            (md-ts-mode)
+            (font-lock-ensure)
+            (should-not (overlay-get overlay 'category))
+            (let ((button (button-at pos)))
+              (should button)
+              (should (markerp button))
+              (should (md-ts--link-button-p button))
+              (should (equal (button-get button 'md-ts-link-static-target)
+                             "https://example.com")))))
       (kill-buffer buf))))
 
 (ert-deftest md-ts-test-link-bare-static-activation-honors-foreign-overlap ()

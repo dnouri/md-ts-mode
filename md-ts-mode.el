@@ -1064,7 +1064,8 @@ when definitions elsewhere in the buffer change.  When
 STATIC-TARGET is non-nil, activation first revalidates the current
 bare-link text at the button position."
   (when (and (< beg end) (not (string-empty-p url)))
-    (if (md-ts--foreign-button-in-region-p beg end)
+    (if (or (md-ts--foreign-button-in-region-p beg end)
+            (md-ts--foreign-interactive-property-in-region-p beg end))
         (md-ts--remove-link-button-properties beg end)
       (unless static-target
         (with-silent-modifications
@@ -1730,11 +1731,10 @@ all font-lock state."
   (setq md-ts--link-reference-definition-change-p nil))
 
 (defconst md-ts--link-button-properties
-  '(button nil category nil action nil help-echo nil keymap nil
-    mouse-face nil follow-link nil md-ts-link-button nil
+  '(button nil category nil action nil md-ts-link-button nil
     md-ts-link-help-echo nil md-ts-link-static-target nil
     md-ts-bare-link-face nil)
-  "Text properties owned by md-ts link buttons.")
+  "Text properties always owned by md-ts link buttons.")
 
 (defconst md-ts--link-button-residual-properties
   '(md-ts-link-button nil md-ts-link-help-echo nil
@@ -1745,6 +1745,10 @@ all font-lock state."
   '(button action category help-echo md-ts-link-button
     md-ts-link-help-echo md-ts-link-static-target md-ts-bare-link-face)
   "Text properties that delimit md-ts link-button cleanup segments.")
+
+(defconst md-ts--foreign-interactive-text-properties
+  '(help-echo action keymap local-map mouse-face follow-link)
+  "Non-button text properties that md-ts link UI must not overwrite.")
 
 (defun md-ts--legacy-link-button-p (button)
   "Return non-nil if BUTTON has c102465's dynamic md-ts shape."
@@ -1826,6 +1830,42 @@ all font-lock state."
         (owned-help (get-text-property pos 'md-ts-link-help-echo)))
     (and owned-help (equal help owned-help))))
 
+(defun md-ts--direct-text-property (pos prop)
+  "Return direct text property PROP at POS, ignoring category defaults."
+  (plist-get (text-properties-at pos) prop))
+
+(defun md-ts--foreign-interactive-property-at-p (pos)
+  "Return non-nil if POS has non-button UI props foreign to md-ts."
+  (or (and (md-ts--direct-text-property pos 'help-echo)
+           (not (md-ts--stale-link-help-echo-p pos))
+           (not (md-ts--legacy-dynamic-text-link-button-p pos)))
+      (let ((action (md-ts--direct-text-property pos 'action)))
+        (and action (not (eq action #'md-ts--open-link-button))))
+      (md-ts--direct-text-property pos 'keymap)
+      (md-ts--direct-text-property pos 'local-map)
+      (md-ts--direct-text-property pos 'mouse-face)
+      (md-ts--direct-text-property pos 'follow-link)))
+
+(defun md-ts--next-foreign-interactive-property-change (pos limit)
+  "Return next foreign-interactive property change after POS before LIMIT."
+  (let ((next limit))
+    (dolist (prop md-ts--foreign-interactive-text-properties next)
+      (setq next
+            (min next
+                 (or (next-single-property-change pos prop nil limit)
+                     limit))))))
+
+(defun md-ts--foreign-interactive-property-in-region-p (beg end)
+  "Return non-nil if foreign non-button UI props overlap BEG to END."
+  (let ((pos beg)
+        found)
+    (while (and (< pos end) (not found))
+      (if (md-ts--foreign-interactive-property-at-p pos)
+          (setq found t)
+        (setq pos (md-ts--next-foreign-interactive-property-change
+                   pos end))))
+    found))
+
 (defun md-ts--next-link-button-property-change (pos limit)
   "Return next possible link-button property change after POS before LIMIT."
   (let ((next limit))
@@ -1853,14 +1893,23 @@ all font-lock state."
                      (point-max)))))
     (cons beg end)))
 
+(defun md-ts--remove-stale-link-help-echo-properties (beg end)
+  "Remove md-ts-owned `help-echo' text properties from BEG to END."
+  (let ((pos beg))
+    (while (< pos end)
+      (let ((next (md-ts--next-link-button-property-change pos end)))
+        (when (or (md-ts--stale-link-help-echo-p pos)
+                  (md-ts--legacy-dynamic-text-link-button-p pos))
+          (remove-text-properties pos next '(help-echo nil)))
+        (setq pos next)))))
+
 (defun md-ts--remove-link-residual-properties-at (pos)
   "Remove stale md-ts residual link properties at POS.
 Return the end of the removed cleanup segment.  Foreign text button
 properties are not removed."
   (pcase-let ((`(,span-beg . ,span-end)
                (md-ts--link-button-property-segment pos)))
-    (when (md-ts--stale-link-help-echo-p pos)
-      (remove-text-properties span-beg span-end '(help-echo nil)))
+    (md-ts--remove-stale-link-help-echo-properties span-beg span-end)
     (md-ts--remove-link-face-from-region span-beg span-end)
     (remove-text-properties span-beg span-end
                             md-ts--link-button-residual-properties)
@@ -1882,6 +1931,8 @@ buttons are cleared without taking ownership."
            ((md-ts--owned-text-link-button-p pos)
             (pcase-let ((`(,span-beg . ,span-end)
                          (md-ts--property-span pos 'button)))
+              (md-ts--remove-stale-link-help-echo-properties
+               span-beg span-end)
               (md-ts--remove-link-face-from-region span-beg span-end)
               (remove-text-properties
                span-beg span-end md-ts--link-button-properties)
@@ -1962,6 +2013,8 @@ left intact."
              ((md-ts--static-bare-text-link-button-p pos)
               (pcase-let ((`(,span-beg . ,span-end)
                            (md-ts--property-span pos 'button)))
+                (md-ts--remove-stale-link-help-echo-properties
+                 span-beg span-end)
                 (md-ts--remove-link-face-from-region span-beg span-end)
                 (remove-text-properties
                  span-beg span-end md-ts--link-button-properties)
@@ -1969,8 +2022,8 @@ left intact."
              ((get-text-property pos 'md-ts-link-static-target)
               (pcase-let ((`(,span-beg . ,span-end)
                            (md-ts--link-button-property-segment pos)))
-                (when (md-ts--stale-link-help-echo-p pos)
-                  (remove-text-properties span-beg span-end '(help-echo nil)))
+                (md-ts--remove-stale-link-help-echo-properties
+                 span-beg span-end)
                 (md-ts--remove-link-face-from-region span-beg span-end)
                 (remove-text-properties
                  span-beg span-end md-ts--link-button-residual-properties)
@@ -2233,18 +2286,24 @@ left intact."
      beg end md-ts--bare-link-unsafe-context-ranges))))
 
 (defun md-ts--button-overlaps-region-p (beg end)
-  "Return non-nil when any text or overlay button overlaps BEG to END."
+  "Return non-nil when any real text or overlay button overlaps BEG to END."
   (or (seq-some (lambda (overlay)
-                  (and (overlay-get overlay 'button) overlay))
+                  (and (overlay-get overlay 'button)
+                       (overlay-get overlay 'category)
+                       overlay))
                 (overlays-in beg end))
       (let ((pos beg)
             found)
         (while (and (< pos end) (not found))
-          (if (get-text-property pos 'button)
+          (if (md-ts--text-button-at-p pos)
               (setq found t)
-            (setq pos (or (next-single-property-change
-                           pos 'button nil end)
-                          end))))
+            (setq pos
+                  (min (or (next-single-property-change
+                            pos 'button nil end)
+                           end)
+                       (or (next-single-property-change
+                            pos 'category nil end)
+                           end)))))
         found)))
 
 (defconst md-ts--bare-link-terminal-punctuation '(?. ?, ?\; ?\: ?\! ?\?)
@@ -2358,7 +2417,10 @@ t, reject candidates that overlap any existing button.  When it is
        (not (string-empty-p target))
        (not (pcase check-overlap
               ('foreign (md-ts--foreign-button-in-region-p beg end))
-              ((pred identity) (md-ts--button-overlaps-region-p beg end))))
+              ((pred identity)
+               (or (md-ts--button-overlaps-region-p beg end)
+                   (md-ts--foreign-interactive-property-in-region-p
+                    beg end)))))
        (not (md-ts--bare-link-unsafe-context-p beg end))))
 
 (defun md-ts--fontify-bare-links-with-regexp
