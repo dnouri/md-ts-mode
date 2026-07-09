@@ -4888,6 +4888,42 @@ inline parser ranges cause the first range's faces to be dropped."
                                                'markdown))
       (should (equal deleted '(bad-parser))))))
 
+(ert-deftest md-ts-test-link-indirect-edit-cleans-stale-single-line-parsed-link ()
+  "Indirect single-line edits should clear stale parsed-link UI."
+  (let ((base (md-ts-test--fontify "See [Doc](https://example.com/doc) now.\n"))
+        indirect doc-marker)
+    (unwind-protect
+        (progn
+          (with-current-buffer base
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (setq doc-marker (copy-marker (match-beginning 0)))
+            (should (md-ts--link-button-p (button-at doc-marker)))
+            (should (equal (get-text-property doc-marker 'help-echo)
+                           "https://example.com/doc")))
+          (setq indirect (make-indirect-buffer base " *md-ts-indirect*" t))
+          (with-current-buffer indirect
+            (md-ts-mode)
+            (goto-char (1- (marker-position doc-marker)))
+            (should (looking-at-p "\\["))
+            (delete-char 1)
+            (funcall font-lock-fontify-region-function
+                     (line-beginning-position) (line-end-position) nil))
+          (with-current-buffer base
+            (let ((doc-pos (marker-position doc-marker)))
+              (should (equal (buffer-substring-no-properties
+                              doc-pos (+ doc-pos 3))
+                             "Doc"))
+              (should-not (button-at doc-pos))
+              (dolist (prop '(button category action help-echo
+                                     md-ts-link-button
+                                     md-ts-link-help-echo
+                                     md-ts-link-static-target))
+                (should-not (get-text-property doc-pos prop))))))
+      (when (buffer-live-p indirect)
+        (kill-buffer indirect))
+      (kill-buffer base))))
+
 (ert-deftest md-ts-test-link-bare-indirect-edit-base-cleans-stale-multiline-link ()
   "Stale multiline bounds recorded in an indirect buffer are shared."
   (let ((base (md-ts-test--fontify "[first\nsecond](https://parsed.example)\n"))

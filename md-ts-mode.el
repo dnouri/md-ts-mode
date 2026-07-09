@@ -1854,6 +1854,15 @@ all font-lock state."
     md-ts-link-static-target nil md-ts-bare-link-face nil)
   "Md-ts-specific link props that can remain under foreign buttons.")
 
+(defconst md-ts--parsed-link-button-properties
+  '(button nil category nil action nil md-ts-link-button nil
+    md-ts-link-help-echo nil)
+  "Text properties owned by md-ts parsed link buttons.")
+
+(defconst md-ts--parsed-link-button-residual-properties
+  '(md-ts-link-button nil md-ts-link-help-echo nil)
+  "Md-ts-specific parsed link props that can remain under foreign buttons.")
+
 (defconst md-ts--link-button-segment-properties
   '(button action category help-echo md-ts-link-button
     md-ts-link-help-echo md-ts-link-static-target md-ts-bare-link-face)
@@ -2018,6 +2027,11 @@ properties, but overlays cloned from the base buffer still do."
   (or (md-ts--current-text-link-button-p pos)
       (md-ts--legacy-dynamic-text-link-button-p pos)))
 
+(defun md-ts--parsed-text-link-button-p (pos)
+  "Return non-nil if POS has an md-ts-owned parsed text button."
+  (and (md-ts--owned-text-link-button-p pos)
+       (not (get-text-property pos 'md-ts-link-static-target))))
+
 (defun md-ts--link-residual-property-at-p (pos)
   "Return non-nil if POS has md-ts link residual text props."
   (or (get-text-property pos 'md-ts-link-button)
@@ -2146,6 +2160,40 @@ buttons are cleared without taking ownership."
            (t
             (setq pos (md-ts--next-link-button-property-change
                        pos limit)))))))))
+
+(defun md-ts--remove-parsed-link-button-properties (beg end)
+  "Remove md-ts-owned parsed link button properties from BEG to END.
+Static bare-link buttons and foreign text or overlay buttons are left intact."
+  (with-silent-modifications
+    (let ((inhibit-read-only t))
+      (save-restriction
+        (widen)
+        (let ((pos (min (max beg (point-min)) (point-max)))
+              (limit (min (max end (point-min)) (point-max))))
+          (while (< pos limit)
+            (cond
+             ((md-ts--parsed-text-link-button-p pos)
+              (pcase-let ((`(,span-beg . ,span-end)
+                           (md-ts--property-span pos 'button)))
+                (md-ts--remove-stale-link-help-echo-properties
+                 span-beg span-end)
+                (remove-text-properties
+                 span-beg span-end md-ts--parsed-link-button-properties)
+                (setq pos (min limit (max (1+ pos) span-end)))))
+             ((and (not (get-text-property pos 'md-ts-link-static-target))
+                   (or (get-text-property pos 'md-ts-link-button)
+                       (get-text-property pos 'md-ts-link-help-echo)))
+              (pcase-let ((`(,span-beg . ,span-end)
+                           (md-ts--link-button-property-segment pos)))
+                (md-ts--remove-stale-link-help-echo-properties
+                 span-beg span-end)
+                (remove-text-properties
+                 span-beg span-end
+                 md-ts--parsed-link-button-residual-properties)
+                (setq pos (min limit (max (1+ pos) span-end)))))
+             (t
+              (setq pos (md-ts--next-link-button-property-change
+                         pos limit))))))))))
 
 (defun md-ts--link-face-value-p (face)
   "Return non-nil when FACE includes `link'."
@@ -3369,6 +3417,8 @@ jit-lock bounds for the expanded physical lines fontified and bare-scanned."
     (save-restriction
       (widen)
       (md-ts--remove-display-properties fontify-beg fontify-end)
+      (when (buffer-base-buffer)
+        (md-ts--remove-parsed-link-button-properties fontify-beg fontify-end))
       (md-ts--font-lock-prune-invalid-local-parsers fontify-beg fontify-end)
       (md-ts--with-base-buffer-widened
         (treesit-font-lock-fontify-region fontify-beg fontify-end loudly)))
