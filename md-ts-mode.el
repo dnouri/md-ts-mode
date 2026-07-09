@@ -2051,13 +2051,36 @@ left intact."
       (md-ts--remove-link-button-properties beg end)
       (font-lock-default-unfontify-region beg end))))
 
-(defconst md-ts--bare-link-unsafe-node-types
-  '("inline_link" "full_reference_link" "collapsed_reference_link"
-    "shortcut_link" "image" "link_reference_definition"
-    "uri_autolink" "email_autolink" "link_destination"
-    "code_span" "fenced_code_block" "indented_code_block"
-    "code_fence_content" "info_string" "html_block" "html_tag")
+(defun md-ts--treesit-query-specs-for-node-types (specs capture)
+  "Return tree-sitter query SPECS that capture node types as CAPTURE."
+  (mapcar (lambda (spec)
+            (pcase-let ((`(,language . ,node-types) spec))
+              (cons language
+                    (apply #'append
+                           (mapcar (lambda (node-type)
+                                     `((,node-type) ,capture))
+                                   node-types)))))
+          specs))
+
+(defconst md-ts--bare-link-unsafe-node-type-specs
+  '((markdown . (link_reference_definition fenced_code_block
+                indented_code_block code_fence_content info_string
+                html_block link_destination))
+    ;; Keep optional front matter node types separate so older grammars that
+    ;; do not know them do not invalidate the core Markdown unsafe query.
+    (markdown . (minus_metadata))
+    (markdown . (plus_metadata))
+    (markdown-inline . (inline_link full_reference_link
+                        collapsed_reference_link shortcut_link image
+                        uri_autolink email_autolink link_destination
+                        code_span html_tag)))
   "Tree-sitter node types where bare link scanning should not apply.")
+
+(defconst md-ts--bare-link-unsafe-node-types
+  (mapcar #'symbol-name
+          (apply #'append
+                 (mapcar #'cdr md-ts--bare-link-unsafe-node-type-specs)))
+  "Tree-sitter node type names where bare link scanning should not apply.")
 
 (defconst md-ts--bare-link-unsafe-context-no-cache
   'md-ts--bare-link-unsafe-context-no-cache
@@ -2068,23 +2091,8 @@ left intact."
   "Dynamically bound unsafe ranges or range cache for bare-link scans.")
 
 (defconst md-ts--bare-link-unsafe-range-queries
-  '((markdown . ((link_reference_definition) @unsafe
-                 (fenced_code_block) @unsafe
-                 (indented_code_block) @unsafe
-                 (code_fence_content) @unsafe
-                 (info_string) @unsafe
-                 (html_block) @unsafe
-                 (link_destination) @unsafe))
-    (markdown-inline . ((inline_link) @unsafe
-                        (full_reference_link) @unsafe
-                        (collapsed_reference_link) @unsafe
-                        (shortcut_link) @unsafe
-                        (image) @unsafe
-                        (uri_autolink) @unsafe
-                        (email_autolink) @unsafe
-                        (link_destination) @unsafe
-                        (code_span) @unsafe
-                        (html_tag) @unsafe)))
+  (md-ts--treesit-query-specs-for-node-types
+   md-ts--bare-link-unsafe-node-type-specs '@unsafe)
   "Tree-sitter queries for ranges unsafe for bare-link scanning.")
 
 (defconst md-ts--bare-link-reference-definition-no-cache
@@ -2561,10 +2569,17 @@ cons of markers in shared buffer coordinates.")
                         (uri_autolink) @node
                         (email_autolink) @node))))
 
+(defconst md-ts--font-lock-bare-unsafe-context-node-type-specs
+  '((markdown . (fenced_code_block indented_code_block html_block))
+    ;; Keep optional front matter nodes separate from the core query.
+    (markdown . (minus_metadata))
+    (markdown . (plus_metadata))
+    (markdown-inline . (code_span html_tag)))
+  "Multi-line unsafe-context node types that can enclose bare UI.")
+
 (defconst md-ts--font-lock-bare-unsafe-context-node-queries
-  '((markdown . ((fenced_code_block) @node
-                 (indented_code_block) @node
-                 (html_block) @node)))
+  (md-ts--treesit-query-specs-for-node-types
+   md-ts--font-lock-bare-unsafe-context-node-type-specs '@node)
   "Queries for multi-line nodes that can make existing bare UI unsafe.")
 
 (defun md-ts--font-lock-line-fontify-bounds (beg end)
@@ -2726,32 +2741,47 @@ or end line is touched by FONTIFY-BEG..FONTIFY-END."
     (md-ts--font-lock-set-stale-side-effect-bounds (nreverse keep))
     (nreverse bounds)))
 
+(defun md-ts--font-lock-record-stale-node-bounds
+    (fontify-beg fontify-end queries &optional boundary-only)
+  "Record old multi-line node bounds from QUERIES touched by a change.
+FONTIFY-BEG and FONTIFY-END are line-based change bounds.  When
+BOUNDARY-ONLY is non-nil, only record nodes whose boundary line is
+touched by the change bounds."
+  (dolist (spec queries)
+    (pcase-let ((`(,language . ,query) spec))
+      (dolist (root (md-ts--font-lock-root-nodes
+                     fontify-beg fontify-end language))
+        (dolist (capture (ignore-errors
+                            (treesit-query-capture
+                             root query fontify-beg fontify-end)))
+          (let ((node (cdr capture)))
+            (when (and (md-ts--font-lock-multiline-node-p node)
+                       (md-ts--regions-intersect-p
+                        fontify-beg fontify-end
+                        (treesit-node-start node)
+                        (treesit-node-end node))
+                       (or (not boundary-only)
+                           (md-ts--region-touches-node-boundary-line-p
+                            node fontify-beg fontify-end)))
+              (pcase-let ((`(,expanded-beg . ,expanded-end)
+                           (md-ts--font-lock-line-fontify-bounds
+                            (treesit-node-start node)
+                            (treesit-node-end node))))
+                (md-ts--font-lock-push-stale-side-effect-bounds
+                 expanded-beg expanded-end)))))))))
+
 (defun md-ts--font-lock-record-stale-side-effect-bounds (beg end)
-  "Record old multi-line side-effect node bounds touched by BEG..END."
+  "Record old multi-line side-effect or bare-unsafe bounds touched by BEG..END."
   (save-excursion
     (save-restriction
       (widen)
       (pcase-let ((`(,fontify-beg . ,fontify-end)
                    (md-ts--font-lock-line-fontify-bounds beg end)))
-        (dolist (spec (md-ts--font-lock-side-effect-node-queries))
-          (pcase-let ((`(,language . ,query) spec))
-            (dolist (root (md-ts--font-lock-root-nodes
-                           fontify-beg fontify-end language))
-              (dolist (capture (ignore-errors
-                                  (treesit-query-capture
-                                   root query fontify-beg fontify-end)))
-                (let ((node (cdr capture)))
-                  (when (and (md-ts--font-lock-multiline-node-p node)
-                             (md-ts--regions-intersect-p
-                              fontify-beg fontify-end
-                              (treesit-node-start node)
-                              (treesit-node-end node)))
-                    (pcase-let ((`(,expanded-beg . ,expanded-end)
-                                 (md-ts--font-lock-line-fontify-bounds
-                                  (treesit-node-start node)
-                                  (treesit-node-end node))))
-                      (md-ts--font-lock-push-stale-side-effect-bounds
-                       expanded-beg expanded-end))))))))))))
+        (md-ts--font-lock-record-stale-node-bounds
+         fontify-beg fontify-end (md-ts--font-lock-side-effect-node-queries))
+        (md-ts--font-lock-record-stale-node-bounds
+         fontify-beg fontify-end
+         md-ts--font-lock-bare-unsafe-context-node-queries t)))))
 
 (defun md-ts--font-lock-expand-bounds-for-side-effects (beg end)
   "Expand BEG..END to cover multi-line callback side-effect nodes.

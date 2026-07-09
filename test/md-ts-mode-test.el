@@ -4022,6 +4022,125 @@ inline parser ranges cause the first range's faces to be dropped."
             (should-not (get-text-property pos 'md-ts-link-static-target))))
       (kill-buffer buf))))
 
+(defun md-ts-test--fontify-line-at (pos)
+  "Run md-ts fontification for the physical line containing POS."
+  (save-excursion
+    (goto-char pos)
+    (funcall font-lock-fontify-region-function
+             (line-beginning-position) (line-end-position) nil)))
+
+(defun md-ts-test--assert-no-bare-button-at-search (target)
+  "Assert TARGET has no stale md-ts bare-link behavior or properties."
+  (goto-char (point-min))
+  (search-forward target)
+  (let ((pos (match-beginning 0)))
+    (should-not (button-at pos))
+    (should-not (get-text-property pos 'md-ts-link-static-target))
+    (should-not (get-text-property pos 'md-ts-link-help-echo))
+    (should-not (get-text-property pos 'md-ts-bare-link-face))
+    (goto-char pos)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (&rest _args)
+                 (ert-fail "browse-url called for unsafe bare link")))
+              ((symbol-function 'find-file)
+               (lambda (&rest _args)
+                 (ert-fail "find-file called for unsafe bare link")))
+              ((symbol-function 'url-mailto)
+               (lambda (&rest _args)
+                 (ert-fail "url-mailto called for unsafe bare link"))))
+      (should-error (md-ts-open-link-at-point) :type 'user-error))))
+
+(defun md-ts-test--assert-bare-button-opens-at-search (target)
+  "Assert TARGET has a current bare-link button that opens TARGET."
+  (goto-char (point-min))
+  (search-forward target)
+  (let* ((pos (match-beginning 0))
+         (button (button-at pos))
+         opened)
+    (should button)
+    (should (md-ts--link-button-p button))
+    (should (equal (button-get button 'md-ts-link-static-target) target))
+    (should (equal (get-text-property pos 'help-echo) target))
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (push-button pos))
+    (should (equal opened target))))
+
+(ert-deftest md-ts-test-link-bare-unsafe-ranges-skip-front-matter-metadata ()
+  "Bare links are prose-oriented and should skip front matter metadata."
+  (dolist (case '(("YAML" . "---\nurl: https://meta.example/path\n---\n\nhttps://prose.example/path\n")
+                  ("TOML" . "+++\nurl = \"https://meta.example/path\"\n+++\n\nhttps://prose.example/path\n")))
+    (ert-info ((format "checking %s front matter" (car case)))
+      (let ((buf (md-ts-test--fontify (cdr case))))
+        (unwind-protect
+            (with-current-buffer buf
+              (md-ts-test--assert-no-bare-button-at-search
+               "https://meta.example/path")
+              (md-ts-test--assert-bare-button-opens-at-search
+               "https://prose.example/path"))
+          (kill-buffer buf))))))
+
+(ert-deftest md-ts-test-link-bare-regional-context-edit-buttonizes-unsafe-to-prose ()
+  "Boundary-only unsafe-to-prose edits should rescan old unsafe bodies."
+  (dolist (case '(("fenced code" "```\nhttps://fence.example/path\n```\n"
+                   "```" "x``" "https://fence.example/path")
+                  ("HTML block" "<div>\nhttps://block.example/path\n</div>\n"
+                   "<div>" "xdiv>" "https://block.example/path")
+                  ("indented code" "    https://indent.example/path\n"
+                   " " "x" "https://indent.example/path")
+                  ("multiline code span" "`\nhttps://span.example/path\n`\n"
+                   "`" "x" "https://span.example/path")
+                  ("multiline HTML tag" "<tag\nhref=\"https://tag.example/path\">\n"
+                   "<tag" "xtag" "https://tag.example/path")
+                  ("YAML metadata" "---\nurl: https://yaml.example/path\n---\n\n"
+                   "---" "xxx" "https://yaml.example/path")
+                  ("TOML metadata" "+++\nurl = \"https://toml.example/path\"\n+++\n\n"
+                   "+++" "xxx" "https://toml.example/path")))
+    (pcase-let ((`(,label ,text ,search ,replacement ,target) case))
+      (ert-info ((format "checking %s" label))
+        (let ((buf (md-ts-test--fontify text)))
+          (unwind-protect
+              (with-current-buffer buf
+                (md-ts-test--assert-no-bare-button-at-search target)
+                (goto-char (point-min))
+                (search-forward search)
+                (let ((line-pos (match-beginning 0)))
+                  (replace-match replacement t t)
+                  (md-ts-test--fontify-line-at line-pos))
+                (md-ts-test--assert-bare-button-opens-at-search target))
+            (kill-buffer buf)))))))
+
+(ert-deftest md-ts-test-link-bare-regional-context-edit-cleans-prose-to-unsafe ()
+  "Boundary-only prose-to-unsafe edits should clear enclosed bare UI."
+  (dolist (case '(("fenced code" "x``\nhttps://fence.example/path\n```\n"
+                   "x``" "```" "https://fence.example/path")
+                  ("HTML block" "xdiv>\nhttps://block.example/path\n</div>\n"
+                   "xdiv>" "<div>" "https://block.example/path")
+                  ("indented code" "x   https://indent.example/path\n"
+                   "x" " " "https://indent.example/path")
+                  ("multiline code span" "x\nhttps://span.example/path\n`\n"
+                   "x" "`" "https://span.example/path")
+                  ("multiline HTML tag" "xtag\nhref=\"https://tag.example/path\">\n"
+                   "xtag" "<tag" "https://tag.example/path")
+                  ("YAML metadata" "xxx\nurl: https://yaml.example/path\n---\n\n"
+                   "xxx" "---" "https://yaml.example/path")
+                  ("TOML metadata" "xxx\nurl = \"https://toml.example/path\"\n+++\n\n"
+                   "xxx" "+++" "https://toml.example/path")))
+    (pcase-let ((`(,label ,text ,search ,replacement ,target) case))
+      (ert-info ((format "checking %s" label))
+        (let ((buf (md-ts-test--fontify text)))
+          (unwind-protect
+              (with-current-buffer buf
+                (md-ts-test--assert-bare-button-opens-at-search target)
+                (goto-char (point-min))
+                (search-forward search)
+                (let ((line-pos (match-beginning 0)))
+                  (replace-match replacement t t)
+                  (md-ts-test--fontify-line-at line-pos))
+                (md-ts-test--assert-no-bare-button-at-search target))
+            (kill-buffer buf)))))))
+
 (ert-deftest md-ts-test-link-bare-edit-to-autolink-clears-static-target ()
   "Editing a bare URL into an autolink should keep a parsed button."
   (let ((url "https://example.com/path")

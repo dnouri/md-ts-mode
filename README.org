@@ -41,7 +41,8 @@ reference links, reference-definition labels with destinations, URI
 autolinks, email autolinks, and bare prose URLs, email addresses, and
 supported =mailto:= forms.
 Bare-link detection is prose-only and skips code, HTML tags/attributes
-and HTML blocks, parsed-link/autolink, and reference-definition contexts.
+and HTML blocks, YAML/TOML front matter metadata, parsed-link/autolink,
+and reference-definition contexts.
 Use =C-c C-o=
 (~md-ts-open-link-at-point~) to open the link at point; standard Emacs
 button mouse/help-echo behavior applies.
