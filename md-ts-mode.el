@@ -1794,26 +1794,48 @@ all font-lock state."
              (overlays-in beg end)))))))
 
 (defun md-ts--shared-overlay-button-p (overlay)
-  "Return non-nil if OVERLAY should block shared text button props."
+  "Return non-nil if local OVERLAY blocks shared text button props.
+Use `md-ts--shared-overlay-buttons-in-region' to include base-buffer
+overlays that are not present in an indirect buffer."
   (and (md-ts--overlay-button-p overlay)
        (or (not (buffer-base-buffer))
            (md-ts--base-overlay-counterpart-p overlay))))
 
+(defun md-ts--shared-overlay-buttons-in-region (beg end)
+  "Return overlay buttons in BEG to END that block shared text props.
+Ordinary buffers treat local overlay buttons as blockers.  Indirect
+buffers treat base-origin local overlays and overlapping base-buffer
+overlays as blockers, while ignoring truly local indirect overlays."
+  (let ((overlays (seq-filter #'md-ts--shared-overlay-button-p
+                              (overlays-in beg end)))
+        (base (buffer-base-buffer)))
+    (if base
+        (nconc overlays
+               (with-current-buffer base
+                 (seq-filter #'md-ts--overlay-button-p
+                             (overlays-in beg end))))
+      overlays)))
+
 (defun md-ts--foreign-overlay-button-in-region-p (beg end)
-  "Return non-nil if a foreign overlay button overlaps BEG to END."
-  (seq-some (lambda (overlay)
-              (and (md-ts--overlay-button-p overlay)
-                   (not (md-ts--owned-link-button-p overlay))
-                   overlay))
-            (overlays-in beg end)))
+  "Return non-nil if a foreign overlay button overlaps BEG to END.
+Indirect buffers also inspect base-buffer overlays because link text
+properties are shared with the base buffer."
+  (let ((base (buffer-base-buffer)))
+    (seq-some (lambda (overlay)
+                (and (md-ts--overlay-button-p overlay)
+                     (not (md-ts--owned-link-button-p overlay))
+                     overlay))
+              (append (overlays-in beg end)
+                      (when base
+                        (with-current-buffer base
+                          (overlays-in beg end)))))))
 
 (defun md-ts--foreign-shared-overlay-button-in-region-p (beg end)
   "Return non-nil if a foreign shared overlay button overlaps BEG to END."
   (seq-some (lambda (overlay)
-              (and (md-ts--shared-overlay-button-p overlay)
-                   (not (md-ts--owned-link-button-p overlay))
+              (and (not (md-ts--owned-link-button-p overlay))
                    overlay))
-            (overlays-in beg end)))
+            (md-ts--shared-overlay-buttons-in-region beg end)))
 
 (defun md-ts--foreign-text-button-in-region-p (beg end)
   "Return non-nil if a foreign text-property button overlaps BEG to END."
@@ -2362,10 +2384,7 @@ left intact."
 
 (defun md-ts--shared-overlay-button-in-region-p (beg end)
   "Return non-nil when any shared overlay button overlaps BEG to END."
-  (seq-some (lambda (overlay)
-              (and (md-ts--shared-overlay-button-p overlay)
-                   overlay))
-            (overlays-in beg end)))
+  (car (md-ts--shared-overlay-buttons-in-region beg end)))
 
 (defun md-ts--text-button-in-region-p (beg end)
   "Return non-nil when any text-property button overlaps BEG to END."

@@ -4254,6 +4254,52 @@ inline parser ranges cause the first range's faces to be dropped."
         (kill-buffer indirect))
       (kill-buffer base))))
 
+(ert-deftest md-ts-test-link-indirect-late-base-foreign-overlay-keeps-parsed-props-clean ()
+  "Indirect refontification should respect base overlays added later."
+  (let ((base (md-ts-test--fontify "See [Doc](https://example.com/doc) now.\n"))
+        indirect link-pos link-end overlay-called)
+    (unwind-protect
+        (progn
+          (with-current-buffer base
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (setq link-pos (match-beginning 0)
+                  link-end (match-end 0))
+            (should (md-ts--link-button-p (button-at link-pos))))
+          (setq indirect (make-indirect-buffer base " *md-ts-indirect*" t))
+          (with-current-buffer indirect
+            (md-ts-mode))
+          (with-current-buffer base
+            (let ((overlay (make-button link-pos link-end
+                                        'action (lambda (_button)
+                                                  (setq overlay-called t))
+                                        'help-echo "overlay")))
+              (font-lock-flush (point-min) (point-max))
+              (font-lock-ensure)
+              (should (eq (button-at link-pos) overlay))
+              (dolist (prop '(button category action help-echo
+                                     md-ts-link-button
+                                     md-ts-link-help-echo
+                                     md-ts-link-static-target))
+                (should-not (get-text-property link-pos prop)))))
+          (with-current-buffer indirect
+            (funcall font-lock-fontify-region-function
+                     (point-min) (point-max) nil))
+          (with-current-buffer base
+            (should-not overlay-called)
+            (let ((button (button-at link-pos)))
+              (should button)
+              (should-not (md-ts--link-button-p button))
+              (should (equal (button-get button 'help-echo) "overlay")))
+            (dolist (prop '(button category action help-echo
+                                   md-ts-link-button
+                                   md-ts-link-help-echo
+                                   md-ts-link-static-target))
+              (should-not (get-text-property link-pos prop)))))
+      (when (buffer-live-p indirect)
+        (kill-buffer indirect))
+      (kill-buffer base))))
+
 (ert-deftest md-ts-test-link-bare-indirect-base-foreign-overlay-keeps-props-clean ()
   "Indirect refontification should respect base-origin bare-link overlays."
   (let ((base (md-ts-test--fontify "Visit https://example.com/path now.\n"))
@@ -4292,6 +4338,54 @@ inline parser ranges cause the first range's faces to be dropped."
                                    md-ts-link-button
                                    md-ts-link-help-echo
                                    md-ts-link-static-target))
+              (should-not (get-text-property link-pos prop)))))
+      (when (buffer-live-p indirect)
+        (kill-buffer indirect))
+      (kill-buffer base))))
+
+(ert-deftest md-ts-test-link-bare-indirect-late-base-foreign-overlay-keeps-props-clean ()
+  "Indirect bare refontification should respect base overlays added later."
+  (let ((base (md-ts-test--fontify "Visit https://example.com/path now.\n"))
+        indirect link-pos link-end overlay-called)
+    (unwind-protect
+        (progn
+          (with-current-buffer base
+            (goto-char (point-min))
+            (search-forward "https://example.com/path")
+            (setq link-pos (match-beginning 0)
+                  link-end (match-end 0))
+            (should (md-ts--link-button-p (button-at link-pos))))
+          (setq indirect (make-indirect-buffer base " *md-ts-indirect*" t))
+          (with-current-buffer indirect
+            (md-ts-mode))
+          (with-current-buffer base
+            (let ((overlay (make-button link-pos link-end
+                                        'action (lambda (_button)
+                                                  (setq overlay-called t))
+                                        'help-echo "overlay")))
+              (font-lock-flush (point-min) (point-max))
+              (font-lock-ensure)
+              (should (eq (button-at link-pos) overlay))
+              (dolist (prop '(button category action help-echo
+                                     md-ts-link-button
+                                     md-ts-link-help-echo
+                                     md-ts-link-static-target
+                                     md-ts-bare-link-face))
+                (should-not (get-text-property link-pos prop)))))
+          (with-current-buffer indirect
+            (funcall font-lock-fontify-region-function
+                     (point-min) (point-max) nil))
+          (with-current-buffer base
+            (should-not overlay-called)
+            (let ((button (button-at link-pos)))
+              (should button)
+              (should-not (md-ts--link-button-p button))
+              (should (equal (button-get button 'help-echo) "overlay")))
+            (dolist (prop '(button category action help-echo
+                                   md-ts-link-button
+                                   md-ts-link-help-echo
+                                   md-ts-link-static-target
+                                   md-ts-bare-link-face))
               (should-not (get-text-property link-pos prop)))))
       (when (buffer-live-p indirect)
         (kill-buffer indirect))
