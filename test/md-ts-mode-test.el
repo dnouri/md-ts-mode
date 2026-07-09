@@ -26,6 +26,8 @@
 (require 'button)
 (require 'md-ts-mode)
 
+(declare-function md-ts--refresh-local-parsers "md-ts-mode" (&optional beg end))
+
 ;;; Test helpers
 
 (defun md-ts-test--fontify (text)
@@ -263,6 +265,25 @@ where the upstream shadowing bug is fixed."
                    '((inline) @cap))))
     (and (= 1 (length settings))
          (eq (nth 4 (car settings)) #'treesit-range-fn-exclude-children))))
+
+(defvar md-ts-test--python-local-parser-available :unknown
+  "Cached availability result for Python local-parser coverage.")
+
+(defun md-ts-test--python-local-parser-available-p ()
+  "Return non-nil if Python local parser creation can be tested."
+  (when (eq md-ts-test--python-local-parser-available :unknown)
+    (setq md-ts-test--python-local-parser-available
+          (and (fboundp 'python-ts-mode)
+               (treesit-language-available-p 'python)
+               (condition-case nil
+                   (let ((inhibit-message t)
+                         (message-log-max nil))
+                     (with-temp-buffer
+                       (insert "def foo():\n    return 42\n")
+                       (python-ts-mode)
+                       t))
+                 (error nil)))))
+  md-ts-test--python-local-parser-available)
 
 (defvar md-ts-test--python-ts-mode-font-lock-compatible :unknown
   "Cached compatibility result for probing `python-ts-mode' font lock.")
@@ -678,6 +699,11 @@ This allows themes to provide their own heading heights."
   "Fenced code block with language should get `md-ts-code' face on body."
   (should (md-ts-test--has-face
            "```sample\nprint('hi')\n```\n" "print" 'md-ts-code)))
+
+(ert-deftest md-ts-test-fenced-code-block-language-face ()
+  "Fenced code block language tags should use `md-ts-language-keyword'."
+  (should (md-ts-test--has-face
+           "```sample\nprint('hi')\n```\n" "sample" 'md-ts-language-keyword)))
 
 (ert-deftest md-ts-test-indented-code-block-no-delimiter ()
   "Indented code block continuation indent must not get delimiter face."
@@ -6866,6 +6892,60 @@ we still expect the historical failure until upstream is corrected."
       (should (functionp (nth 1 tuple)))
       (should (eq (nth 2 tuple) t)))))  ; local
 
+(ert-deftest md-ts-test-optional-front-matter-query-probes-capture ()
+  "Optional front matter query support should catch deferred query errors."
+  (cl-letf (((symbol-function 'treesit-query-compile)
+             (lambda (_language _query) t))
+            ((symbol-function 'md-ts--buffer-root-node)
+             (lambda (_language) :root))
+            ((symbol-function 'treesit-query-capture)
+             (lambda (&rest _args)
+               (signal 'treesit-query-error '("bad node")))))
+    (should-not (md-ts--query-supported-p
+                 'markdown '((minus_metadata) @yaml)))))
+
+(ert-deftest md-ts-test-optional-front-matter-range-rules-skip-unsupported ()
+  "Optional front matter range rules should skip missing node types."
+  (cl-letf (((symbol-function 'md-ts--query-supported-p)
+             (lambda (_language _query) nil))
+            ((symbol-function 'treesit-range-rules)
+             (lambda (&rest _args)
+               (ert-fail "treesit-range-rules called for unsupported query"))))
+    (should-not (md-ts--front-matter-range-settings
+                 'yaml '((minus_metadata) @yaml)))))
+
+(ert-deftest md-ts-test-optional-front-matter-range-rules-catch-query-error ()
+  "Optional front matter range rules should tolerate range-rule query errors."
+  (cl-letf (((symbol-function 'md-ts--query-supported-p)
+             (lambda (_language _query) t))
+            ((symbol-function 'treesit-range-rules)
+             (lambda (&rest _args)
+               (signal 'treesit-query-error '("bad node")))))
+    (should-not (md-ts--front-matter-range-settings
+                 'yaml '((minus_metadata) @yaml)))))
+
+(ert-deftest md-ts-test-refresh-local-parsers-ignores-non-md-ts-buffers ()
+  "Global native range advice should not refresh non-md-ts buffers."
+  (skip-unless (and (fboundp 'md-ts--refresh-local-parsers)
+                    (treesit-ready-p 'markdown t)))
+  (let ((buf (generate-new-buffer " *md-ts-test-refresh-non-md*"))
+        (called nil))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "# Not md-ts-mode\n")
+          (text-mode)
+          (let* ((parser (treesit-parser-create 'markdown))
+                 (ov (make-overlay (point-min) (point-max))))
+            (overlay-put ov 'treesit-parser parser)
+            (overlay-put ov 'treesit-parser-ov-timestamp 0)
+            (cl-letf (((symbol-function 'md-ts--recreate-local-parser)
+                       (lambda (&rest _args)
+                         (setq called t)
+                         parser)))
+              (funcall 'md-ts--refresh-local-parsers))
+            (should-not called)))
+      (kill-buffer buf))))
+
 (ert-deftest md-ts-test-range-rules-no-range-fn ()
   "Shimmed treesit-range-rules without :range-fn still produces 5-element tuple.
 The 5th element should be nil."
@@ -6892,7 +6972,7 @@ verify that a local python parser overlay is created."
     (unwind-protect
         (with-current-buffer buf
           (insert "```python\ndef foo():\n    pass\n```\n")
-          (let* ((md-parser (treesit-parser-create 'markdown))
+          (let* ((_md-parser (treesit-parser-create 'markdown))
                  (query (treesit-query-compile
                          'markdown
                          '((fenced_code_block
@@ -6917,7 +6997,7 @@ Use a language resolver function that returns \\='python for the
     (unwind-protect
         (with-current-buffer buf
           (insert "```python\ndef foo():\n    pass\n```\n")
-          (let* ((md-parser (treesit-parser-create 'markdown))
+          (let* ((_md-parser (treesit-parser-create 'markdown))
                  (query (treesit-query-compile
                          'markdown
                          '((fenced_code_block
@@ -6943,7 +7023,7 @@ Use a language resolver function that returns \\='python for the
     (unwind-protect
         (with-current-buffer buf
           (insert "```python\ndef foo():\n    pass\n```\n")
-          (let* ((md-parser (treesit-parser-create 'markdown))
+          (let* ((_md-parser (treesit-parser-create 'markdown))
                  (query (treesit-query-compile
                          'markdown
                          '((fenced_code_block
@@ -6966,7 +7046,7 @@ into multiple gap ranges, creating more overlays than without."
     (unwind-protect
         (with-current-buffer buf
           (insert "```python\ndef foo():\n    pass\n```\n")
-          (let* ((md-parser (treesit-parser-create 'markdown))
+          (let* ((_md-parser (treesit-parser-create 'markdown))
                  (query (treesit-query-compile
                          'markdown
                          '((fenced_code_block
@@ -6993,7 +7073,7 @@ are set correctly."
     (unwind-protect
         (with-current-buffer buf
           (insert "# Hello\n\nPara *bold* end.\n")
-          (let* ((md-parser (treesit-parser-create 'markdown))
+          (let* ((_md-parser (treesit-parser-create 'markdown))
                  (inline-parser (treesit-parser-create 'markdown-inline)))
             (setq-local treesit-range-settings
                         (treesit-range-rules
@@ -7016,7 +7096,7 @@ parser should get multiple gap ranges per (inline) node."
     (unwind-protect
         (with-current-buffer buf
           (insert "# Hello\n\nPara *bold* end.\n")
-          (let* ((md-parser (treesit-parser-create 'markdown))
+          (let* ((_md-parser (treesit-parser-create 'markdown))
                  (inline-parser (treesit-parser-create 'markdown-inline)))
             ;; Without range-fn: 2 ranges (one per inline node)
             (setq-local treesit-range-settings
@@ -7051,7 +7131,7 @@ is created."
     (unwind-protect
         (with-current-buffer buf
           (insert "```python\ndef foo():\n    pass\n```\n")
-          (let ((md-parser (treesit-parser-create 'markdown)))
+          (let ((_md-parser (treesit-parser-create 'markdown)))
             (setq-local treesit-range-settings
                         (treesit-range-rules
                          :embed #'(lambda (node)
@@ -7226,13 +7306,13 @@ Additional rules appear when html/yaml/toml grammars are installed."
 
 (ert-deftest md-ts-test-code-block-local-parser ()
   "Python code block should get a local python parser."
-  (skip-unless (md-ts-test--python-ts-mode-font-lock-compatible-p))
+  (skip-unless (md-ts-test--python-local-parser-available-p))
   (let ((buf (generate-new-buffer " *md-ts-test-cblp*")))
     (unwind-protect
         (with-current-buffer buf
           (insert "# Title\n\n```python\ndef foo():\n    pass\n```\n")
           (md-ts-mode)
-          (font-lock-ensure)
+          (treesit-update-ranges)
           (let ((found nil))
             (dolist (ov (overlays-in (point-min) (point-max)))
               (when-let* ((p (overlay-get ov 'treesit-parser)))

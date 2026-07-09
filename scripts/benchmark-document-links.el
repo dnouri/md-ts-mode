@@ -30,15 +30,23 @@
     (split-string value path-separator t)))
 
 (defun md-ts-bench--add-existing-tree-sitter-paths ()
-  "Add common tree-sitter grammar directories when they exist."
-  (dolist (dir (append (md-ts-bench--env-paths "MD_TS_TREE_SITTER_DIR")
-                       (md-ts-bench--env-paths "TREE_SITTER_GRAMMAR_DIR")
-                       (list (expand-file-name "tree-sitter"
-                                               user-emacs-directory))))
-    (when (and (stringp dir)
-               (not (string-empty-p dir))
-               (file-directory-p dir))
-      (add-to-list 'treesit-extra-load-path dir))))
+  "Add common tree-sitter grammar directories when they exist.
+Entries from MD_TS_TREE_SITTER_DIR have highest priority, followed
+by TREE_SITTER_GRAMMAR_DIR and finally the default user directory."
+  (let (paths)
+    (dolist (dir (append (md-ts-bench--env-paths "MD_TS_TREE_SITTER_DIR")
+                         (md-ts-bench--env-paths "TREE_SITTER_GRAMMAR_DIR")
+                         (list (expand-file-name "tree-sitter"
+                                                 user-emacs-directory))))
+      (when (and (stringp dir)
+                 (not (string-empty-p dir))
+                 (file-directory-p dir)
+                 (not (member dir paths)))
+        (push dir paths)))
+    (setq treesit-extra-load-path
+          (append (nreverse paths)
+                  (cl-remove-if (lambda (dir) (member dir paths))
+                                treesit-extra-load-path)))))
 
 (md-ts-bench--add-existing-tree-sitter-paths)
 (add-to-list 'load-path md-ts-bench--repo-root)
@@ -51,6 +59,10 @@
         (max 1 (string-to-number value))
       3))
   "Number of timed iterations per benchmark case.")
+
+(defvar md-ts-bench-smoke
+  (and (member (getenv "MD_TS_BENCH_SMOKE") '("1" "t" "true" "yes")) t)
+  "Non-nil means run a tiny runtime smoke instead of full benchmarks.")
 
 (setq inhibit-message t
       message-log-max nil
@@ -77,6 +89,11 @@
                                 "-C" md-ts-bench--repo-root
                                 "diff" "--quiet" "HEAD" "--")))
     (error nil)))
+
+(defun md-ts-bench--git-untracked-p ()
+  "Return non-nil when untracked files are present in the checkout."
+  (not (string-empty-p (md-ts-bench--git-output
+                        "ls-files" "--others" "--exclude-standard"))))
 
 (defun md-ts-bench--line-count (text)
   "Return the number of logical lines in TEXT."
@@ -207,15 +224,38 @@
                           i i i)))))
     (buffer-string)))
 
-(defun md-ts-bench--fontify-text (text)
-  "Enable `md-ts-mode' and fontify TEXT in a temporary buffer."
+(defun md-ts-bench--count-property-spans (property)
+  "Return the number of non-nil contiguous spans for PROPERTY."
+  (let ((pos (point-min))
+        (count 0))
+    (while (< pos (point-max))
+      (let ((next (or (next-single-property-change pos property nil
+                                                   (point-max))
+                      (point-max))))
+        (when (get-text-property pos property)
+          (setq count (1+ count)))
+        (setq pos next)))
+    count))
+
+(defun md-ts-bench--link-counts ()
+  "Return counts for md-ts link artifacts in the current buffer."
+  (list :link-buttons (md-ts-bench--count-property-spans 'md-ts-link-button)
+        :bare-link-props (md-ts-bench--count-property-spans 'md-ts-bare-link-face)
+        :static-targets (md-ts-bench--count-property-spans
+                         'md-ts-link-static-target)))
+
+(defun md-ts-bench--fontify-text (text &optional count)
+  "Enable `md-ts-mode' and fontify TEXT in a temporary buffer.
+When COUNT is non-nil, return link artifact counts after fontification."
   (let ((buffer (generate-new-buffer " *md-ts-bench*")))
     (unwind-protect
         (with-current-buffer buffer
           (insert text)
           (goto-char (point-min))
           (md-ts-mode)
-          (font-lock-ensure (point-min) (point-max)))
+          (font-lock-ensure (point-min) (point-max))
+          (when count
+            (md-ts-bench--link-counts)))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
@@ -242,14 +282,22 @@
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
-(defun md-ts-bench--emit-result (case-name op text item-count item-unit times)
+(defun md-ts-bench--emit-result (case-name op text item-count item-unit counts times)
   "Print one parseable-ish RESULT line for CASE-NAME and TIMES."
   (md-ts-bench--log
-   (concat "RESULT commit=%s case=%s op=%s items=%d item_unit=%s lines=%d chars=%d "
-           "iterations=%d median_ms=%.3f min_ms=%.3f max_ms=%.3f times_ms=%s")
+   (concat "RESULT commit=%s tracked_dirty=%S untracked=%S case=%s op=%s "
+           "items=%d item_unit=%s lines=%d chars=%d link_buttons=%d "
+           "bare_link_props=%d static_targets=%d iterations=%d "
+           "median_ms=%.3f min_ms=%.3f max_ms=%.3f times_ms=%s")
    (md-ts-bench--git-output "rev-parse" "--short" "HEAD")
+   (md-ts-bench--git-dirty-p)
+   (md-ts-bench--git-untracked-p)
    case-name op item-count item-unit
-   (md-ts-bench--line-count text) (length text) (length times)
+   (md-ts-bench--line-count text) (length text)
+   (plist-get counts :link-buttons)
+   (plist-get counts :bare-link-props)
+   (plist-get counts :static-targets)
+   (length times)
    (md-ts-bench--median times) (apply #'min times) (apply #'max times)
    (md-ts-bench--format-ms-list times)))
 
@@ -262,18 +310,63 @@
 (defun md-ts-bench--emit-environment ()
   "Print benchmark environment metadata."
   (md-ts-bench--log
-   "ENV commit=%s dirty=%S emacs=%s repo=%s iterations=%d system=%s"
+   "ENV commit=%s tracked_dirty=%S untracked=%S emacs=%s repo=%s iterations=%d smoke=%S system=%s"
    (md-ts-bench--git-output "rev-parse" "--short" "HEAD")
    (md-ts-bench--git-dirty-p)
+   (md-ts-bench--git-untracked-p)
    emacs-version
    (abbreviate-file-name md-ts-bench--repo-root)
    md-ts-bench-iterations
+   md-ts-bench-smoke
    system-configuration)
   (md-ts-bench--log "TREESIT available=%S extra_load_path=%S"
                     (treesit-available-p) treesit-extra-load-path)
   (dolist (language '(markdown markdown-inline html yaml toml))
     (md-ts-bench--log "GRAMMAR lang=%s ready=%S"
                       language (treesit-ready-p language t))))
+
+(defun md-ts-bench--cases ()
+  "Return benchmark cases, using tiny fixtures in smoke mode."
+  (if md-ts-bench-smoke
+      `(("plain-prose-smoke" mode+font-lock
+         ,(md-ts-bench--plain-prose-doc 5) 5 "lines")
+        ("bare-links-smoke" mode+font-lock
+         ,(md-ts-bench--bare-links-doc 2) 2 "lines")
+        ("long-line-one-char-jit-smoke" jit-one-char
+         ,(md-ts-bench--long-line-doc 2) 2 "link-groups")
+        ("parsed-refs-smoke" mode+font-lock
+         ,(md-ts-bench--parsed-references-doc 2) 2 "references")
+        ("mixed-chat-prose-smoke" mode+font-lock
+         ,(md-ts-bench--mixed-chat-prose-doc 2) 2 "threads"))
+    `(("plain-prose-800" mode+font-lock
+       ,(md-ts-bench--plain-prose-doc 800) 800 "lines")
+      ("bare-links-100" mode+font-lock
+       ,(md-ts-bench--bare-links-doc 100) 100 "lines")
+      ("bare-links-400" mode+font-lock
+       ,(md-ts-bench--bare-links-doc 400) 400 "lines")
+      ("bare-links-800" mode+font-lock
+       ,(md-ts-bench--bare-links-doc 800) 800 "lines")
+      ("long-line-one-char-jit" jit-one-char
+       ,(md-ts-bench--long-line-doc 300) 300 "link-groups")
+      ("parsed-refs-400" mode+font-lock
+       ,(md-ts-bench--parsed-references-doc 400) 400 "references")
+      ("parsed-refs-800" mode+font-lock
+       ,(md-ts-bench--parsed-references-doc 800) 800 "references")
+      ("mixed-chat-prose" mode+font-lock
+       ,(md-ts-bench--mixed-chat-prose-doc 100) 100 "threads"))))
+
+(defun md-ts-bench--validate-smoke-counts (case-name counts)
+  "Signal an error in smoke mode if CASE-NAME did no expected link work."
+  (when md-ts-bench-smoke
+    (cond
+     ((string-match-p "\\`plain-prose" case-name)
+      nil)
+     ((string-match-p "bare-links\\|long-line\\|mixed-chat" case-name)
+      (unless (> (plist-get counts :bare-link-props) 0)
+        (error "Smoke case %s produced no bare-link props" case-name)))
+     ((string-match-p "parsed-refs" case-name)
+      (unless (> (plist-get counts :link-buttons) 0)
+        (error "Smoke case %s produced no md-ts link buttons" case-name))))))
 
 (defun md-ts-bench-run ()
   "Run advisory document-link fontification benchmarks."
@@ -284,36 +377,23 @@
         ;; first reported case without adding an extra expensive run per fixture.
         (md-ts-bench--fontify-text
          "# Warmup\n\nText [x](https://example.com) https://example.org user@example.org\n")
-        (let ((cases `(("plain-prose-800" mode+font-lock
-                        ,(md-ts-bench--plain-prose-doc 800) 800 "lines")
-                       ("bare-links-100" mode+font-lock
-                        ,(md-ts-bench--bare-links-doc 100) 100 "lines")
-                       ("bare-links-400" mode+font-lock
-                        ,(md-ts-bench--bare-links-doc 400) 400 "lines")
-                       ("bare-links-800" mode+font-lock
-                        ,(md-ts-bench--bare-links-doc 800) 800 "lines")
-                       ("long-line-one-char-jit" jit-one-char
-                        ,(md-ts-bench--long-line-doc 300) 300 "link-groups")
-                       ("parsed-refs-400" mode+font-lock
-                        ,(md-ts-bench--parsed-references-doc 400) 400 "references")
-                       ("parsed-refs-800" mode+font-lock
-                        ,(md-ts-bench--parsed-references-doc 800) 800 "references")
-                       ("mixed-chat-prose" mode+font-lock
-                        ,(md-ts-bench--mixed-chat-prose-doc 100) 100 "threads"))))
-          (dolist (case cases)
-            (pcase-let ((`(,name ,op ,text ,items ,item-unit) case))
-              (md-ts-bench--log "CASE name=%s op=%s items=%d item_unit=%s lines=%d chars=%d"
-                                name op items item-unit
-                                (md-ts-bench--line-count text) (length text))
-              (let ((times (pcase op
-                             ('mode+font-lock
-                              (md-ts-bench--measure
-                               md-ts-bench-iterations
-                               (lambda () (md-ts-bench--fontify-text text))))
-                             ('jit-one-char
-                              (md-ts-bench--measure-jit-one-char
-                               md-ts-bench-iterations text)))))
-                (md-ts-bench--emit-result name op text items item-unit times)))))
+        (dolist (case (md-ts-bench--cases))
+          (pcase-let ((`(,name ,op ,text ,items ,item-unit) case))
+            (md-ts-bench--log "CASE name=%s op=%s items=%d item_unit=%s lines=%d chars=%d"
+                              name op items item-unit
+                              (md-ts-bench--line-count text) (length text))
+            (let* ((counts (md-ts-bench--fontify-text text t))
+                   (times (pcase op
+                            ('mode+font-lock
+                             (md-ts-bench--measure
+                              md-ts-bench-iterations
+                              (lambda () (md-ts-bench--fontify-text text))))
+                            ('jit-one-char
+                             (md-ts-bench--measure-jit-one-char
+                              md-ts-bench-iterations text)))))
+              (md-ts-bench--validate-smoke-counts name counts)
+              (md-ts-bench--emit-result name op text items item-unit
+                                        counts times))))
         (md-ts-bench--log "DONE commit=%s"
                           (md-ts-bench--git-output "rev-parse" "--short" "HEAD")))
     (md-ts-bench--log

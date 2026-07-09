@@ -5,7 +5,7 @@
 
 ;; Author: Daniel Nouri <daniel.nouri@gmail.com>
 ;; URL: https://github.com/dnouri/md-ts-mode
-;; Version: 0.3.0
+;; Version: 0.4.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: markdown languages tree-sitter
 
@@ -526,18 +526,19 @@ If BEG and END are non-nil, only update ranges in that region."
 Workaround for tree-sitter < 0.25.0 integer underflow — see
 `md-ts--recreate-local-parser' for details.
 Must run as :before advice on `treesit-update-ranges'."
-    (let ((tick (buffer-chars-modified-tick))
-          (beg (or beg (point-min)))
-          (end (or end (point-max))))
-      (dolist (ov (overlays-in beg end))
-        (when-let* ((old-parser (overlay-get ov 'treesit-parser))
-                    ((treesit-parser-language old-parser))
-                    (ov-tick (overlay-get ov 'treesit-parser-ov-timestamp)))
-          (when (not (eql ov-tick tick))
-            (when-let* ((new-parser
-                         (md-ts--recreate-local-parser ov old-parser)))
-              (treesit-parser-set-included-ranges
-               new-parser `((,(overlay-start ov) . ,(overlay-end ov))))))))))
+    (when (derived-mode-p 'md-ts-mode)
+      (let ((tick (buffer-chars-modified-tick))
+            (beg (or beg (point-min)))
+            (end (or end (point-max))))
+        (dolist (ov (overlays-in beg end))
+          (when-let* ((old-parser (overlay-get ov 'treesit-parser))
+                      ((treesit-parser-language old-parser))
+                      (ov-tick (overlay-get ov 'treesit-parser-ov-timestamp)))
+            (when (not (eql ov-tick tick))
+              (when-let* ((new-parser
+                           (md-ts--recreate-local-parser ov old-parser)))
+                (treesit-parser-set-included-ranges
+                 new-parser `((,(overlay-start ov) . ,(overlay-end ov)))))))))))
   (advice-add 'treesit-update-ranges :before
               'md-ts--refresh-local-parsers))
 
@@ -1030,9 +1031,9 @@ backslash escapes."
     (md-ts--markdown-unescape url)))
 
 (defvar-local md-ts--link-reference-definitions-cache nil
-  "Cached alist of Markdown link reference definitions.
-Each entry has the form (LABEL . URL), where LABEL is normalized
-with `md-ts--reference-label-key'.")
+  "Cached hash table of Markdown link reference definitions.
+Keys are labels normalized with `md-ts--reference-label-key';
+values are URLs normalized with `md-ts--link-destination-url'.")
 
 (defvar-local md-ts--link-reference-definitions-cache-tick nil
   "Buffer modified tick represented by reference definitions cache.
@@ -1069,8 +1070,8 @@ distinct from unescaped punctuation."
 
 (defun md-ts--link-reference-definitions ()
   "Return cached Markdown link reference definitions.
-The result is an alist of (LABEL . URL).  LABEL is normalized with
-`md-ts--reference-label-key'.  URL is normalized with
+The result is a hash table mapping labels normalized with
+`md-ts--reference-label-key' to URLs normalized with
 `md-ts--link-destination-url'.  When duplicate labels exist, the
 first definition in source order wins.  The cache ignores any
 active narrowing so references resolve against the whole buffer."
@@ -1078,7 +1079,8 @@ active narrowing so references resolve against the whole buffer."
     (widen)
     (let ((tick (buffer-chars-modified-tick)))
       (unless (equal md-ts--link-reference-definitions-cache-tick tick)
-        (let (definitions)
+        (let ((definitions (make-hash-table :test #'equal))
+              (missing (make-symbol "missing")))
           (when-let* ((root (ignore-errors
                               (md-ts--buffer-root-node 'markdown))))
             (dolist (capture (md-ts--with-base-buffer-widened
@@ -1096,13 +1098,12 @@ active narrowing so references resolve against the whole buffer."
                            (md-ts--node-text label-node))))
                 (when (and destination-node
                            (not (string-empty-p key))
-                           (not (assoc key definitions)))
-                  (push (cons key
-                              (md-ts--link-destination-url
-                               (md-ts--node-text destination-node)))
-                        definitions)))))
-          (setq md-ts--link-reference-definitions-cache
-                (nreverse definitions)
+                           (eq (gethash key definitions missing) missing))
+                  (puthash key
+                           (md-ts--link-destination-url
+                            (md-ts--node-text destination-node))
+                           definitions)))))
+          (setq md-ts--link-reference-definitions-cache definitions
                 md-ts--link-reference-definitions-cache-tick tick)))
       md-ts--link-reference-definitions-cache)))
 
@@ -1110,9 +1111,8 @@ active narrowing so references resolve against the whole buffer."
   "Resolve Markdown reference LABEL to its destination URL.
 Return nil when the current buffer has no matching link reference
 definition."
-  (alist-get (md-ts--reference-label-key label)
-             (md-ts--link-reference-definitions)
-             nil nil #'equal))
+  (gethash (md-ts--reference-label-key label)
+           (md-ts--link-reference-definitions)))
 
 (defun md-ts--open-link-destination (url)
   "Open supported Markdown or bare link destination URL.
@@ -1347,13 +1347,19 @@ OVERRIDE, START, and END are passed to `treesit-fontify-with-override'."
             (md-ts--add-markup-invisible-property
              (treesit-node-start child) (treesit-node-end node)))))))))
 
-(defun md-ts--fontify-fenced-code-block (node _override _start _end &rest _)
+(defun md-ts--fontify-fenced-code-block (node override start end &rest _)
   "Fontify fenced code block NODE, hiding fence lines when appropriate.
 When `md-ts-hide-markup' is non-nil, hides the opening fence line
 \(delimiter + language tag + newline) and closing fence line
 \(delimiter + newline) so no phantom blank lines remain.
 The `md-ts-code' face is applied separately via a late-running
-font-lock rule to avoid interfering with embedded language faces."
+font-lock rule to avoid interfering with embedded language faces.
+OVERRIDE, START, and END are passed to `treesit-fontify-with-override'."
+  (when-let* ((info-node (md-ts--child-by-type node "info_string"))
+              (language-node (md-ts--child-by-type info-node "language")))
+    (treesit-fontify-with-override
+     (treesit-node-start language-node) (treesit-node-end language-node)
+     'md-ts-language-keyword override start end))
   (when (md-ts--hide-markup-enabled-p)
     (let ((block-start (treesit-node-start node))
           (block-end (treesit-node-end node)))
@@ -1558,6 +1564,37 @@ Return nil if no tree-sitter mode is available for the language."
         nil)))))
 
 ;;; Range settings
+
+(defun md-ts--query-supported-p (language query)
+  "Return non-nil when LANGUAGE accepts and can run QUERY.
+Some Emacs/tree-sitter combinations accept unknown node types while
+compiling and reject them only when the query is executed, so probe both
+steps before installing optional range settings."
+  (condition-case nil
+      (progn
+        (treesit-query-compile language query)
+        (when-let* ((root (ignore-errors (md-ts--buffer-root-node language))))
+          (treesit-query-capture root query (point-min) (point-min)))
+        t)
+    (treesit-query-error nil)))
+
+(defun md-ts--range-rules-if-query-supported (host-language query &rest args)
+  "Return range rules from ARGS when HOST-LANGUAGE accepts QUERY.
+If the installed host grammar lacks optional node types in QUERY,
+or if `treesit-range-rules' rejects QUERY, return nil instead."
+  (when (md-ts--query-supported-p host-language query)
+    (condition-case nil
+        (apply #'treesit-range-rules args)
+      (treesit-query-error nil))))
+
+(defun md-ts--front-matter-range-settings (embed-language query)
+  "Return optional front matter range settings for EMBED-LANGUAGE and QUERY."
+  (md-ts--range-rules-if-query-supported
+   'markdown query
+   :embed embed-language
+   :host 'markdown
+   :local t
+   query))
 
 (defun md-ts--range-settings ()
   "Return range settings for `md-ts-mode'.
@@ -3748,11 +3785,8 @@ buffers still clean old md-ts properties when the mode starts."
                   yaml-ts-mode--font-lock-feature-list)))
     (setq-local treesit-range-settings
                 (append treesit-range-settings
-                        (treesit-range-rules
-                         :embed 'yaml
-                         :host 'markdown
-                         :local t
-                         '((minus_metadata) @yaml)))))
+                        (md-ts--front-matter-range-settings
+                         'yaml '((minus_metadata) @yaml)))))
 
   (when (treesit-ready-p 'toml t)
     (require 'toml-ts-mode)
@@ -3767,11 +3801,8 @@ buffers still clean old md-ts properties when the mode starts."
                   toml-ts-mode--font-lock-feature-list)))
     (setq-local treesit-range-settings
                 (append treesit-range-settings
-                        (treesit-range-rules
-                         :embed 'toml
-                         :host 'markdown
-                         :local t
-                         '((plus_metadata) @toml)))))
+                        (md-ts--front-matter-range-settings
+                         'toml '((plus_metadata) @toml)))))
 
   (md-ts--with-base-buffer-widened
     (treesit-major-mode-setup))

@@ -16,13 +16,15 @@ $(error PERF_ITERATIONS must be a positive integer)
 endif
 endif
 
-.PHONY: test compile compile-benchmark lint lint-checkdoc lint-package check check-parens clean help install-hooks snapshot perf
+.PHONY: test compile compile-tests compile-benchmark perf-smoke lint lint-checkdoc lint-package check check-parens clean help install-hooks snapshot perf
 
 help:
 	@echo "Targets:"
 	@echo "  make test           Run ERT tests (SELECTOR=pattern, VERBOSE=1)"
-	@echo "  make compile        Byte-compile with warnings-as-errors"
+	@echo "  make compile        Byte-compile package with warnings-as-errors"
+	@echo "  make compile-tests  Byte-compile tests with warnings-as-errors"
 	@echo "  make compile-benchmark  Byte-compile benchmark tooling"
+	@echo "  make perf-smoke     Run cheap benchmark runtime smoke"
 	@echo "  make lint           Checkdoc + package-lint"
 	@echo "  make lint-checkdoc  Docstring warnings only"
 	@echo "  make lint-package   MELPA package conventions only"
@@ -58,6 +60,15 @@ compile:
 	@$(BATCH) \
 		--eval "(setq byte-compile-error-on-warn t)" \
 		-f batch-byte-compile md-ts-mode.el
+
+compile-tests: compile
+	@rm -f test/*.elc
+	@echo "=== Byte-compile tests ==="
+	@$(BATCH) \
+		-L test \
+		--eval "(setq byte-compile-error-on-warn t)" \
+		-f batch-byte-compile test/md-ts-mode-test.el test/md-ts-mode-ert-font-lock.el
+	@rm -f test/*.elc
 
 compile-benchmark:
 	@rm -f scripts/benchmark-document-links.elc
@@ -122,7 +133,13 @@ perf:
 		$(BATCH) \
 		-l scripts/benchmark-document-links.el
 
-check: compile compile-benchmark lint test
+perf-smoke:
+	@echo "=== Perf smoke ==="
+	@PERF_ITERATIONS=1 MD_TS_BENCH_SMOKE=1 \
+		$(BATCH) \
+		-l scripts/benchmark-document-links.el
+
+check: compile compile-tests compile-benchmark perf-smoke lint test
 
 install-hooks:
 	@git config core.hooksPath hooks

@@ -130,7 +130,10 @@ installed and its grammar available for highlighting to work.
 
 Run ~make check~ before sending changes.  ~make perf~ runs advisory
 link fontification benchmarks; compare =RESULT= lines from runs on the
-same machine rather than treating them as pass/fail thresholds.
+same machine rather than treating them as pass/fail thresholds.  Benchmark
+=RESULT= lines include tracked dirty/untracked state and link-artifact
+counts; ~make perf-smoke~ runs a tiny runtime smoke that skips cleanly
+when the Markdown grammars are unavailable.
 
 
 ** Compatibility
