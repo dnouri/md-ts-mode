@@ -31,7 +31,7 @@ Emacs 29, 30, and 31.
 - Custom faces: ~md-ts-heading-1~ through ~md-ts-heading-6~,
   ~md-ts-delimiter~, ~md-ts-list-marker~, ~md-ts-block-quote~,
   ~md-ts-strikethrough~, ~md-ts-language-keyword~,
-  ~md-ts-task-list-marker~, and ~md-ts-code~.
+  ~md-ts-task-list-marker~, ~md-ts-bare-link~, and ~md-ts-code~.
 
 
 ** Opening links
