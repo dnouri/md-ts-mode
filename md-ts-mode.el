@@ -791,6 +791,11 @@ Applied to heading markers (#), emphasis delimiters (* and **),
 code backticks, setext underlines, thematic breaks, table
 separators, and other structural markup characters.")
 
+(defface md-ts-bare-link '((t (:inherit link)))
+  "Face for bare prose links.
+This inherits from `link' while allowing md-ts cleanup to remove only
+its own face component and preserve foreign face additions.")
+
 (defface md-ts-heading-1 '((t (:inherit outline-1 :weight bold)))
   "Face for first level Markdown headings.")
 
@@ -2167,22 +2172,31 @@ Static bare-link buttons and foreign text or overlay buttons are left intact."
               (setq pos (md-ts--next-link-button-property-change
                          pos limit))))))))))
 
-(defun md-ts--link-face-value-p (face)
-  "Return non-nil when FACE includes `link'."
-  (if (listp face) (memq 'link face)
-    (eq face 'link)))
+(defun md-ts--face-value-member-p (face member)
+  "Return non-nil when FACE includes MEMBER."
+  (if (listp face) (memq member face)
+    (eq face member)))
 
-(defun md-ts--remove-link-face-value (face)
-  "Return FACE with md-ts-owned bare `link' face removed."
+(defun md-ts--link-face-value-p (face)
+  "Return non-nil when FACE includes link-like md-ts display."
+  (or (md-ts--face-value-member-p face 'link)
+      (md-ts--face-value-member-p face 'md-ts-bare-link)))
+
+(defun md-ts--remove-face-value (face member)
+  "Return FACE with face MEMBER removed."
   (cond
-   ((eq face 'link) nil)
-   ((and (listp face) (memq 'link face))
-    (let ((faces (delq 'link (copy-sequence face))))
+   ((eq face member) nil)
+   ((and (listp face) (memq member face))
+    (let ((faces (delq member (copy-sequence face))))
       (cond
        ((null faces) nil)
        ((null (cdr faces)) (car faces))
        (t faces))))
    (t face)))
+
+(defun md-ts--remove-link-face-value (face)
+  "Return FACE with md-ts-owned bare link face removed."
+  (md-ts--remove-face-value face 'md-ts-bare-link))
 
 (defun md-ts--next-link-face-property-change (pos limit)
   "Return next `face' or md-ts bare face ownership change after POS before LIMIT."
@@ -2191,36 +2205,26 @@ Static bare-link buttons and foreign text or overlay buttons are left intact."
            limit)))
 
 (defun md-ts--add-link-face-to-region (beg end)
-  "Add a md-ts-owned bare `link' face to BEG..END where not already present."
+  "Add a md-ts-owned bare link face to BEG..END where absent."
   (let ((pos beg))
     (while (< pos end)
       (let ((next (md-ts--next-link-face-property-change pos end)))
         (unless (md-ts--link-face-value-p (get-text-property pos 'face))
-          (add-face-text-property pos next 'link t)
-          (put-text-property pos next 'md-ts-bare-link-face
-                             (list :md-ts-face
-                                   (get-text-property pos 'face))))
+          (add-face-text-property pos next 'md-ts-bare-link t)
+          (put-text-property pos next 'md-ts-bare-link-face t))
         (setq pos next)))))
 
 (defun md-ts--remove-link-face-from-region (beg end)
-  "Remove md-ts-owned bare `link' face from BEG to END."
+  "Remove md-ts-owned bare link face from BEG to END."
   (let ((pos beg))
     (while (< pos end)
       (let* ((next (md-ts--next-link-face-property-change pos end))
              (owned (get-text-property pos 'md-ts-bare-link-face))
              (face (get-text-property pos 'face))
-             (owned-face (and (consp owned)
-                              (eq (car owned) :md-ts-face)
-                              (cadr owned)))
-             (owned-current-face (if (eq owned t)
-                                     (md-ts--link-face-value-p face)
-                                   (equal face owned-face)))
-             (new-face (and owned-current-face
-                            (md-ts--remove-link-face-value face))))
+             (new-face (and owned (md-ts--remove-link-face-value face))))
         (when owned
-          (when owned-current-face
-            (unless (equal face new-face)
-              (put-text-property pos next 'face new-face)))
+          (unless (equal face new-face)
+            (put-text-property pos next 'face new-face))
           (remove-text-properties pos next '(md-ts-bare-link-face nil)))
         (setq pos next)))))
 
@@ -2935,6 +2939,19 @@ bare `mailto:' form can own URL-like text inside its query."
     (and prior-index
          (<= end (aref (aref url-ranges prior-index) 2)))))
 
+(defun md-ts--bare-link-generic-url-normal-ranges (url-ranges)
+  "Return normalized BEG..END cons ranges from generic URL-RANGES."
+  (mapcar (lambda (range)
+            (cons (aref range 0) (aref range 1)))
+          (append url-ranges nil)))
+
+(defun md-ts--bare-email-excluded-ranges (invalid-mailto-ranges url-ranges)
+  "Return ranges where bare email fallback should not scan.
+INVALID-MAILTO-RANGES and URL-RANGES are sorted vectors."
+  (md-ts--bare-link-sort-merge-ranges
+   (append (append invalid-mailto-ranges nil)
+           (md-ts--bare-link-generic-url-normal-ranges url-ranges))))
+
 (defun md-ts--fontify-bare-url-ranges (url-ranges apply-beg apply-end)
   "Fontify cached URL-RANGES intersecting APPLY-BEG to APPLY-END."
   (dotimes (index (length url-ranges))
@@ -2944,6 +2961,8 @@ bare `mailto:' form can own URL-like text inside its query."
            (target (aref range 3)))
       (when (and (md-ts--regions-intersect-p beg end apply-beg apply-end)
                  (not (md-ts--button-shared-text-blocker-in-region-p
+                       beg end))
+                 (not (md-ts--foreign-interactive-property-in-region-p
                        beg end)))
         (md-ts--fontify-bare-link beg end target)))))
 
@@ -3055,9 +3074,9 @@ Operate on lines covering BEG to END."
                      (md-ts--bare-link-unsafe-context-ranges
                       (md-ts--bare-link-unsafe-range-cache
                        scan-beg scan-end))
-                     (generic-url-ranges-cache
+                     (generic-url-containment-ranges-cache
                       (md-ts--bare-link-generic-url-range-cache
-                       scan-beg scan-end t))
+                       scan-beg scan-end))
                      (scheme-mailto-ranges-cache
                       (md-ts--bare-scheme-mailto-uri-range-cache
                        scan-beg scan-end)))
@@ -3068,12 +3087,17 @@ Operate on lines covering BEG to END."
                 (let ((invalid-mailto-ranges
                        (md-ts--fontify-bare-mailto-uris
                         scan-beg scan-end scan-beg scan-end
-                        generic-url-ranges-cache)))
+                        generic-url-containment-ranges-cache)))
                   (md-ts--fontify-bare-url-ranges
-                   (funcall generic-url-ranges-cache) scan-beg scan-end)
+                   (funcall generic-url-containment-ranges-cache)
+                   scan-beg scan-end)
                   (md-ts--fontify-bare-links-with-regexp-outside-ranges
                    goto-address-mail-regexp
-                   scan-beg scan-end invalid-mailto-ranges scan-beg scan-end
+                   scan-beg scan-end
+                   (md-ts--bare-email-excluded-ranges
+                    invalid-mailto-ranges
+                    (funcall generic-url-containment-ranges-cache))
+                   scan-beg scan-end
                    (lambda (address) (concat "mailto:" address))
                    (lambda (match-beg match-end _text)
                      (md-ts--bare-email-in-scheme-mailto-uri-p
@@ -3416,6 +3440,7 @@ jit-lock bounds for the expanded physical lines fontified and bare-scanned."
       (widen)
       (md-ts--remove-display-properties fontify-beg fontify-end)
       (when (buffer-base-buffer)
+        (md-ts--remove-invisible-properties fontify-beg fontify-end)
         (md-ts--remove-parsed-link-button-properties fontify-beg fontify-end))
       (md-ts--font-lock-prune-invalid-local-parsers fontify-beg fontify-end)
       (md-ts--with-base-buffer-widened
@@ -3508,9 +3533,9 @@ has the same meaning as in `md-ts--bare-link-candidate-valid-p'."
                    (md-ts--bare-link-unsafe-context-ranges
                     (md-ts--bare-link-unsafe-range-cache
                      line-beg line-end))
-                   (generic-url-ranges-cache
+                   (generic-url-containment-ranges-cache
                     (md-ts--bare-link-generic-url-range-cache
-                     line-beg line-end check-overlap))
+                     line-beg line-end))
                    (invalid-mailto-ranges-cache
                     (md-ts--bare-invalid-mailto-uri-range-cache
                      line-beg line-end))
@@ -3521,14 +3546,17 @@ has the same meaning as in `md-ts--bare-link-candidate-valid-p'."
               ;; text, but an outer URL wins over embedded mailto/email-looking
               ;; text in its path or query.
               (or (md-ts--bare-mailto-uri-target-at-point
-                   pos line-beg line-end generic-url-ranges-cache check-overlap)
+                   pos line-beg line-end generic-url-containment-ranges-cache
+                   check-overlap)
                   (md-ts--bare-link-target-at-point-with-regexp
                    pos goto-address-url-regexp line-beg line-end #'identity
                    nil nil check-overlap)
                   (when-let* ((email-segment
                                 (md-ts--range-outside-sorted-ranges-containing-pos
                                  pos line-beg line-end
-                                 (funcall invalid-mailto-ranges-cache))))
+                                 (md-ts--bare-email-excluded-ranges
+                                  (funcall invalid-mailto-ranges-cache)
+                                  (funcall generic-url-containment-ranges-cache)))))
                     (md-ts--bare-link-target-at-point-with-regexp
                      pos goto-address-mail-regexp
                      (car email-segment) (cdr email-segment)
