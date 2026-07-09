@@ -176,6 +176,24 @@ This is nil on Emacs 31+ where the native versions are used.")
             features-2 (cdr features-2)))
     (nreverse result)))
 
+(defmacro md-ts--with-base-buffer-widened (&rest body)
+  "Evaluate BODY with the current indirect buffer's base buffer widened.
+Ordinary buffers keep their current restrictions unchanged.  This is
+for APIs whose underlying parser or overlay state belongs to the base
+buffer."
+  (declare (indent 0) (debug t))
+  (let ((base (make-symbol "base"))
+        (current (make-symbol "current")))
+    `(let ((,base (buffer-base-buffer)))
+       (if (not ,base)
+           (progn ,@body)
+         (let ((,current (current-buffer)))
+           (with-current-buffer ,base
+             (save-restriction
+               (widen)
+               (with-current-buffer ,current
+                 ,@body))))))))
+
 ;; Emacs 29/30 C-function arity adapters.
 ;;
 ;; Emacs 30 added a TAG argument to `treesit-parser-create' and
@@ -186,21 +204,23 @@ This is nil on Emacs 31+ where the native versions are used.")
   "Create a parser for LANG, like `treesit-parser-create'.
 BUFFER, NO-REUSE, and TAG are passed through.
 On Emacs 29, TAG is silently ignored."
-  (if (>= emacs-major-version 30)
-      (treesit-parser-create lang buffer no-reuse tag)
-    (treesit-parser-create lang buffer no-reuse)))
+  (md-ts--with-base-buffer-widened
+    (if (>= emacs-major-version 30)
+        (treesit-parser-create lang buffer no-reuse tag)
+      (treesit-parser-create lang buffer no-reuse))))
 
 (defun md-ts--parser-list (&optional buffer language)
   "Return parsers for BUFFER, optionally filtered by LANGUAGE.
 On Emacs 29, applies the LANGUAGE filter in Lisp."
-  (if (>= emacs-major-version 30)
-      (treesit-parser-list buffer language)
-    (let ((all (treesit-parser-list buffer)))
-      (if language
-          (seq-filter (lambda (p)
-                        (eq (treesit-parser-language p) language))
-                      all)
-        all))))
+  (md-ts--with-base-buffer-widened
+    (if (>= emacs-major-version 30)
+        (treesit-parser-list buffer language)
+      (let ((all (treesit-parser-list buffer)))
+        (if language
+            (seq-filter (lambda (p)
+                          (eq (treesit-parser-language p) language))
+                        all)
+          all)))))
 
 ;; Range functions.
 
@@ -229,7 +249,8 @@ underscore are ignored."
   (let ((offset-left (or (car offset) 0))
         (offset-right (or (cdr offset) 0))
         (result nil))
-    (dolist (capture (treesit-query-capture node query beg end))
+    (dolist (capture (md-ts--with-base-buffer-widened
+                       (treesit-query-capture node query beg end)))
       (let ((name (car capture))
             (cap-node (cdr capture)))
         (unless (string-prefix-p "_" (symbol-name name))
@@ -253,7 +274,8 @@ RANGE-FN have the same meaning as in `treesit-query-range'."
         (offset-right (or (cdr offset) 0))
         (current-lang nil)
         (ranges-by-language nil))
-    (dolist (capture (treesit-query-capture node query beg end))
+    (dolist (capture (md-ts--with-base-buffer-widened
+                       (treesit-query-capture node query beg end)))
       (let ((name (car capture))
             (cap-node (cdr capture)))
         (cond
@@ -387,7 +409,7 @@ Use QUERY to find ranges and ensure each has a local parser for
 EMBEDDED-LANG, which can be a symbol or a function.  MODIFIED-TICK,
 OFFSET, and RANGE-FN control overlay timestamps and range computation."
   (let* ((host-lang (treesit-query-language query))
-         (host-parser (treesit-parser-create host-lang))
+         (host-parser (md-ts--parser-create host-lang))
          (ranges-by-lang (md-ts--query-ranges-by-lang
                           host-parser query embedded-lang
                           beg end offset range-fn)))
@@ -456,7 +478,7 @@ If BEG and END are non-nil, only update ranges in that region."
             (dolist (lang-and-ranges ranges-by-lang)
               (let* ((resolved-lang (car lang-and-ranges))
                      (new-ranges (cdr lang-and-ranges))
-                     (parser (treesit-parser-create resolved-lang))
+                     (parser (md-ts--parser-create resolved-lang))
                      (old-ranges (treesit-parser-included-ranges parser))
                      (set-ranges (treesit--clip-ranges
                                   (treesit--merge-ranges
@@ -564,9 +586,11 @@ local (per-overlay) parsers and global parsers, matching the
 behavior of Emacs 30's `treesit-font-lock-fontify-region'."
   (when (or loudly treesit--font-lock-verbose)
     (message "Fontifying region: %s-%s" start end))
-  (treesit-update-ranges start end)
+  (md-ts--with-base-buffer-widened
+    (treesit-update-ranges start end))
   (font-lock-unfontify-region start end)
-  (let* ((local-parsers (treesit-local-parsers-on start end))
+  (let* ((local-parsers (md-ts--with-base-buffer-widened
+                          (treesit-local-parsers-on start end)))
          (local-langs (mapcar #'treesit-parser-language local-parsers))
          ;; Exclude global parsers whose language has local parsers.
          ;; Local parsers each have a single contiguous range and
@@ -576,7 +600,7 @@ behavior of Emacs 30's `treesit-font-lock-fontify-region'."
          (global-parsers
           (seq-remove (lambda (p)
                         (memq (treesit-parser-language p) local-langs))
-                      (treesit-parser-list)))
+                      (md-ts--parser-list)))
          (root-nodes
           (mapcar #'treesit-parser-root-node
                   (append local-parsers global-parsers))))
@@ -593,7 +617,7 @@ behavior of Emacs 30's `treesit-font-lock-fontify-region'."
         (when (eq treesit--font-lock-fast-mode 'unspecified)
           (pcase-let ((`(,max-depth ,max-width)
                        (treesit-subtree-stat
-                        (treesit-buffer-root-node language))))
+                        (md-ts--buffer-root-node language))))
             (if (or (> max-depth 100) (> max-width 4000))
                 (setq treesit--font-lock-fast-mode t)
               (setq treesit--font-lock-fast-mode nil))))
@@ -613,10 +637,11 @@ behavior of Emacs 30's `treesit-font-lock-fontify-region'."
                    (delta-end
                     (cdr treesit--font-lock-query-expand-range))
                    (captures
-                    (treesit-query-capture
-                     sub-node query
-                     (max (- start delta-start) (point-min))
-                     (min (+ end delta-end) (point-max)))))
+                    (md-ts--with-base-buffer-widened
+                      (treesit-query-capture
+                       sub-node query
+                       (max (- start delta-start) (point-min))
+                       (min (+ end delta-end) (point-max))))))
               (with-silent-modifications
                 (dolist (capture captures)
                   (let* ((face (car capture))
@@ -996,11 +1021,12 @@ active narrowing so references resolve against the whole buffer."
       (unless (equal md-ts--link-reference-definitions-cache-tick tick)
         (let (definitions)
           (when-let* ((root (ignore-errors
-                              (treesit-buffer-root-node 'markdown))))
-            (dolist (capture (treesit-query-capture
-                              root
-                              '((link_reference_definition
-                                 (link_label) @label))))
+                              (md-ts--buffer-root-node 'markdown))))
+            (dolist (capture (md-ts--with-base-buffer-widened
+                               (treesit-query-capture
+                                root
+                                '((link_reference_definition
+                                   (link_label) @label)))))
               (let* ((label-node (cdr capture))
                      (parent (treesit-node-parent label-node))
                      (destination-node
@@ -1516,8 +1542,14 @@ VALUE non-nil hides markup, nil shows it."
 
 (defun md-ts--node-at (pos language)
   "Return the tree-sitter node at POS for LANGUAGE, ignoring errors."
-  (ignore-errors
-    (treesit-node-at pos language)))
+  (md-ts--with-base-buffer-widened
+    (ignore-errors
+      (treesit-node-at pos language))))
+
+(defun md-ts--buffer-root-node (language)
+  "Return the tree-sitter root node for LANGUAGE."
+  (md-ts--with-base-buffer-widened
+    (treesit-buffer-root-node language)))
 
 (defun md-ts--node-contains-position-p (node pos)
   "Return non-nil if NODE includes POS as a character position."
@@ -1587,10 +1619,11 @@ VALUE non-nil hides markup, nil shows it."
     (widen)
     (pcase-let ((`(,line-beg . ,line-end)
                  (md-ts--broadened-line-bounds beg end)))
-      (when-let* ((root (ignore-errors (treesit-buffer-root-node 'markdown))))
-        (treesit-query-capture root
-                               '((link_reference_definition) @definition)
-                               line-beg line-end)))))
+      (when-let* ((root (ignore-errors (md-ts--buffer-root-node 'markdown))))
+        (md-ts--with-base-buffer-widened
+          (treesit-query-capture root
+                                 '((link_reference_definition) @definition)
+                                 line-beg line-end))))))
 
 (defun md-ts--region-needs-adjacent-lines-p (beg end)
   "Return non-nil if BEG..END should inspect neighboring lines.
@@ -1627,10 +1660,11 @@ BOL/EOL edit gets the same conservative treatment."
     (widen)
     (pcase-let ((`(,line-beg . ,line-end)
                  (md-ts--fence-detection-line-bounds beg end)))
-      (when-let* ((root (ignore-errors (treesit-buffer-root-node 'markdown))))
-        (treesit-query-capture root
-                               '((fenced_code_block_delimiter) @delimiter)
-                               line-beg line-end)))))
+      (when-let* ((root (ignore-errors (md-ts--buffer-root-node 'markdown))))
+        (md-ts--with-base-buffer-widened
+          (treesit-query-capture root
+                                 '((fenced_code_block_delimiter) @delimiter)
+                                 line-beg line-end))))))
 
 (defun md-ts--region-has-markdown-fence-p (beg end)
   "Return non-nil for a Markdown fence near BEG and END.
@@ -1690,14 +1724,15 @@ force whole-buffer link refontification."
                   (`(,discover-beg . ,discover-end)
                    (md-ts--broadened-line-bounds beg end)))
         (when-let* ((root (ignore-errors
-                            (treesit-buffer-root-node 'markdown))))
+                            (md-ts--buffer-root-node 'markdown))))
           (seq-some
            (lambda (capture)
              (md-ts--region-touches-node-boundary-line-p
               (cdr capture) touch-beg touch-end))
-           (treesit-query-capture root
-                                  '((html_block) @block)
-                                  discover-beg discover-end)))))))
+           (md-ts--with-base-buffer-widened
+             (treesit-query-capture root
+                                    '((html_block) @block)
+                                    discover-beg discover-end))))))))
 
 (defun md-ts--flush-all-font-lock ()
   "Flush font-lock across the whole buffer, ignoring narrowing."
@@ -1780,18 +1815,20 @@ all font-lock state."
       (or (and (overlayp button)
                (eq (overlay-buffer button) base))
           (with-current-buffer base
-            (seq-some
-             (lambda (base-overlay)
-               (and (= (overlay-start base-overlay) beg)
-                    (= (overlay-end base-overlay) end)
-                    (md-ts--overlay-button-p base-overlay)
-                    (equal (overlay-get base-overlay 'category)
-                           (overlay-get overlay 'category))
-                    (equal (overlay-get base-overlay 'help-echo)
-                           (overlay-get overlay 'help-echo))
-                    (eq (overlay-get base-overlay 'action)
-                        (overlay-get overlay 'action))))
-             (overlays-in beg end)))))))
+            (save-restriction
+              (widen)
+              (seq-some
+               (lambda (base-overlay)
+                 (and (= (overlay-start base-overlay) beg)
+                      (= (overlay-end base-overlay) end)
+                      (md-ts--overlay-button-p base-overlay)
+                      (equal (overlay-get base-overlay 'category)
+                             (overlay-get overlay 'category))
+                      (equal (overlay-get base-overlay 'help-echo)
+                             (overlay-get overlay 'help-echo))
+                      (eq (overlay-get base-overlay 'action)
+                          (overlay-get overlay 'action))))
+               (overlays-in beg end))))))))
 
 (defun md-ts--shared-overlay-button-p (overlay)
   "Return non-nil if local OVERLAY blocks shared text button props.
@@ -1812,8 +1849,10 @@ overlays as blockers, while ignoring truly local indirect overlays."
     (if base
         (nconc overlays
                (with-current-buffer base
-                 (seq-filter #'md-ts--overlay-button-p
-                             (overlays-in beg end))))
+                 (save-restriction
+                   (widen)
+                   (seq-filter #'md-ts--overlay-button-p
+                               (overlays-in beg end)))))
       overlays)))
 
 (defun md-ts--foreign-overlay-button-in-region-p (beg end)
@@ -1828,7 +1867,9 @@ properties are shared with the base buffer."
               (append (overlays-in beg end)
                       (when base
                         (with-current-buffer base
-                          (overlays-in beg end)))))))
+                          (save-restriction
+                            (widen)
+                            (overlays-in beg end))))))))
 
 (defun md-ts--foreign-shared-overlay-button-in-region-p (beg end)
   "Return non-nil if a foreign shared overlay button overlaps BEG to END."
@@ -2257,14 +2298,15 @@ left intact."
 
 (defun md-ts--link-reference-definition-ranges (beg end)
   "Return parsed reference-definition ranges between BEG and END."
-  (when-let* ((root (ignore-errors (treesit-buffer-root-node 'markdown))))
+  (when-let* ((root (ignore-errors (md-ts--buffer-root-node 'markdown))))
     (mapcar (lambda (capture)
               (let ((node (cdr capture)))
                 (cons (treesit-node-start node)
                       (treesit-node-end node))))
-            (treesit-query-capture root
-                                   '((link_reference_definition) @definition)
-                                   beg end))))
+            (md-ts--with-base-buffer-widened
+              (treesit-query-capture root
+                                     '((link_reference_definition) @definition)
+                                     beg end)))))
 
 (defun md-ts--bare-link-sort-merge-ranges (ranges)
   "Return RANGES sorted and merged as a vector of cons cells."
@@ -2287,7 +2329,8 @@ left intact."
         (pcase-let ((`(,language . ,query) spec))
           (dolist (root (md-ts--font-lock-root-nodes beg end language))
             (dolist (capture (ignore-errors
-                                (treesit-query-capture root query beg end)))
+                                (md-ts--with-base-buffer-widened
+                                  (treesit-query-capture root query beg end))))
               (let* ((node (cdr capture))
                      (node-beg (treesit-node-start node))
                      (node-end (treesit-node-end node)))
@@ -3014,22 +3057,23 @@ multi-line side-effect and bare-link unsafe contexts."
 
 (defun md-ts--font-lock-root-nodes (beg end language)
   "Return tree-sitter root nodes for LANGUAGE overlapping BEG to END."
-  (let* ((local-parsers (seq-filter
-                         (lambda (parser)
-                           (eq (md-ts--font-lock-parser-language parser)
-                               language))
-                         (ignore-errors
-                           (treesit-local-parsers-on beg end))))
-         (global-parsers (seq-filter
-                          (lambda (parser)
-                            (eq (md-ts--font-lock-parser-language parser)
-                                language))
-                          (ignore-errors
-                            (md-ts--parser-list nil nil)))))
-    (delq nil
-          (mapcar (lambda (parser)
-                    (ignore-errors (treesit-parser-root-node parser)))
-                  (append local-parsers global-parsers)))))
+  (md-ts--with-base-buffer-widened
+    (let* ((local-parsers (seq-filter
+                           (lambda (parser)
+                             (eq (md-ts--font-lock-parser-language parser)
+                                 language))
+                           (ignore-errors
+                             (treesit-local-parsers-on beg end))))
+           (global-parsers (seq-filter
+                            (lambda (parser)
+                              (eq (md-ts--font-lock-parser-language parser)
+                                  language))
+                            (ignore-errors
+                              (md-ts--parser-list nil nil)))))
+      (delq nil
+            (mapcar (lambda (parser)
+                      (ignore-errors (treesit-parser-root-node parser)))
+                    (append local-parsers global-parsers))))))
 
 (defun md-ts--font-lock-multiline-node-p (node)
   "Return non-nil when NODE spans more than one physical line."
@@ -3055,8 +3099,9 @@ or end line is touched by FONTIFY-BEG..FONTIFY-END."
         (dolist (root (md-ts--font-lock-root-nodes
                        fontify-beg fontify-end language))
           (dolist (capture (ignore-errors
-                              (treesit-query-capture
-                               root query fontify-beg fontify-end)))
+                              (md-ts--with-base-buffer-widened
+                                (treesit-query-capture
+                                 root query fontify-beg fontify-end))))
             (let ((node (cdr capture)))
               (when (and (md-ts--font-lock-multiline-node-p node)
                          (md-ts--regions-intersect-p
@@ -3159,8 +3204,9 @@ touched by the change bounds."
       (dolist (root (md-ts--font-lock-root-nodes
                      fontify-beg fontify-end language))
         (dolist (capture (ignore-errors
-                            (treesit-query-capture
-                             root query fontify-beg fontify-end)))
+                            (md-ts--with-base-buffer-widened
+                              (treesit-query-capture
+                               root query fontify-beg fontify-end))))
           (let ((node (cdr capture)))
             (when (and (md-ts--font-lock-multiline-node-p node)
                        (md-ts--regions-intersect-p
@@ -3198,7 +3244,8 @@ mutate outside the bounds reported to jit-lock."
     (save-restriction
       (widen)
       (md-ts--font-lock-prune-invalid-local-parsers beg end)
-      (ignore-errors (treesit-update-ranges beg end))
+      (md-ts--with-base-buffer-widened
+        (ignore-errors (treesit-update-ranges beg end)))
       (pcase-let ((`(,fontify-beg . ,fontify-end)
                    (md-ts--font-lock-context-line-fontify-bounds beg end)))
         (let ((changed t))
@@ -3249,7 +3296,8 @@ jit-lock bounds for the expanded physical lines fontified and bare-scanned."
       (widen)
       (md-ts--remove-display-properties fontify-beg fontify-end)
       (md-ts--font-lock-prune-invalid-local-parsers fontify-beg fontify-end)
-      (treesit-font-lock-fontify-region fontify-beg fontify-end loudly))
+      (md-ts--with-base-buffer-widened
+        (treesit-font-lock-fontify-region fontify-beg fontify-end loudly)))
     (md-ts--fontify-bare-links fontify-beg fontify-end)
     `(jit-lock-bounds ,fontify-beg . ,fontify-end)))
 
@@ -3258,14 +3306,15 @@ jit-lock bounds for the expanded physical lines fontified and bare-scanned."
 POS defaults to point.  This covers both visible link text and the
 parsed markup belonging to a link."
   (let ((pos (or pos (point))))
-    (save-restriction
-      (widen)
-      (seq-some (lambda (node)
-                  (and node (md-ts--link-target-for-node node)))
-                (list (md-ts--node-at-containing-position
-                       pos 'markdown-inline)
-                      (md-ts--node-at-containing-position
-                       pos 'markdown))))))
+    (md-ts--with-base-buffer-widened
+      (save-restriction
+        (widen)
+        (seq-some (lambda (node)
+                    (and node (md-ts--link-target-for-node node)))
+                  (list (md-ts--node-at-containing-position
+                         pos 'markdown-inline)
+                        (md-ts--node-at-containing-position
+                         pos 'markdown)))))))
 
 (defun md-ts--bare-link-target-at-point-with-regexp
     (pos regexp line-beg line-end target-function &optional skip-function
@@ -3328,44 +3377,45 @@ This recomputes from buffer text and parser context instead of
 trusting possibly stale static button properties.  CHECK-OVERLAP
 has the same meaning as in `md-ts--bare-link-candidate-valid-p'."
   (let ((pos (or pos (point))))
-    (pcase-let ((`(,line-beg . ,line-end) (md-ts--line-bounds pos pos)))
-      (save-restriction
-        (widen)
-        (save-match-data
-          (let* ((case-fold-search t)
-                 (md-ts--bare-link-unsafe-context-ranges
-                  (md-ts--bare-link-unsafe-range-cache
-                   line-beg line-end))
-                 (generic-url-ranges-cache
-                  (md-ts--bare-link-generic-url-range-cache
-                   line-beg line-end check-overlap))
-                 (invalid-mailto-ranges-cache
-                  (md-ts--bare-invalid-mailto-uri-range-cache
-                   line-beg line-end))
-                 (scheme-mailto-ranges-cache
-                  (md-ts--bare-scheme-mailto-uri-range-cache
-                   line-beg line-end)))
-            ;; Match fontification precedence: standalone mailto owns query
-            ;; text, but an outer URL wins over embedded mailto/email-looking
-            ;; text in its path or query.
-            (or (md-ts--bare-mailto-uri-target-at-point
-                 pos line-beg line-end generic-url-ranges-cache check-overlap)
-                (md-ts--bare-link-target-at-point-with-regexp
-                 pos goto-address-url-regexp line-beg line-end #'identity
-                 nil nil check-overlap)
-                (when-let* ((email-segment
-                              (md-ts--range-outside-sorted-ranges-containing-pos
-                               pos line-beg line-end
-                               (funcall invalid-mailto-ranges-cache))))
+    (md-ts--with-base-buffer-widened
+      (pcase-let ((`(,line-beg . ,line-end) (md-ts--line-bounds pos pos)))
+        (save-restriction
+          (widen)
+          (save-match-data
+            (let* ((case-fold-search t)
+                   (md-ts--bare-link-unsafe-context-ranges
+                    (md-ts--bare-link-unsafe-range-cache
+                     line-beg line-end))
+                   (generic-url-ranges-cache
+                    (md-ts--bare-link-generic-url-range-cache
+                     line-beg line-end check-overlap))
+                   (invalid-mailto-ranges-cache
+                    (md-ts--bare-invalid-mailto-uri-range-cache
+                     line-beg line-end))
+                   (scheme-mailto-ranges-cache
+                    (md-ts--bare-scheme-mailto-uri-range-cache
+                     line-beg line-end)))
+              ;; Match fontification precedence: standalone mailto owns query
+              ;; text, but an outer URL wins over embedded mailto/email-looking
+              ;; text in its path or query.
+              (or (md-ts--bare-mailto-uri-target-at-point
+                   pos line-beg line-end generic-url-ranges-cache check-overlap)
                   (md-ts--bare-link-target-at-point-with-regexp
-                   pos goto-address-mail-regexp
-                   (car email-segment) (cdr email-segment)
-                   (lambda (address) (concat "mailto:" address))
-                   (lambda (match-beg match-end _text)
-                     (md-ts--bare-email-in-scheme-mailto-uri-p
-                      match-beg match-end
-                      (funcall scheme-mailto-ranges-cache)))
-                   nil check-overlap)))))))))
+                   pos goto-address-url-regexp line-beg line-end #'identity
+                   nil nil check-overlap)
+                  (when-let* ((email-segment
+                                (md-ts--range-outside-sorted-ranges-containing-pos
+                                 pos line-beg line-end
+                                 (funcall invalid-mailto-ranges-cache))))
+                    (md-ts--bare-link-target-at-point-with-regexp
+                     pos goto-address-mail-regexp
+                     (car email-segment) (cdr email-segment)
+                     (lambda (address) (concat "mailto:" address))
+                     (lambda (match-beg match-end _text)
+                       (md-ts--bare-email-in-scheme-mailto-uri-p
+                        match-beg match-end
+                        (funcall scheme-mailto-ranges-cache)))
+                     nil check-overlap))))))))))
 
 (defun md-ts--open-link-button (button)
   "Open Markdown link BUTTON.
@@ -3406,12 +3456,13 @@ initializes Markdown-inline parser ranges and link button
 properties in fresh `md-ts-mode' buffers, even when the current
 buffer is narrowed to only part of the link."
   (let ((pos (or pos (point))))
-    (save-excursion
-      (save-restriction
-        (widen)
-        (goto-char pos)
-        (font-lock-ensure (line-beginning-position)
-                          (line-end-position))))))
+    (md-ts--with-base-buffer-widened
+      (save-excursion
+        (save-restriction
+          (widen)
+          (goto-char pos)
+          (font-lock-ensure (line-beginning-position)
+                            (line-end-position)))))))
 
 (defun md-ts-open-link-at-point ()
   "Open the supported Markdown or bare prose link at point.
@@ -3491,7 +3542,7 @@ buffers still clean old md-ts properties when the mode starts."
             #'md-ts--after-change-flush-link-reference-links nil t)
 
   (when (treesit-ready-p 'html t)
-    (treesit-parser-create 'html)
+    (md-ts--parser-create 'html)
     (when (require 'html-ts-mode nil t)
       (defvar html-ts-mode--font-lock-settings)
       (setq-local treesit-font-lock-settings
@@ -3552,7 +3603,8 @@ buffers still clean old md-ts properties when the mode starts."
                          :local t
                          '((plus_metadata) @toml)))))
 
-  (treesit-major-mode-setup)
+  (md-ts--with-base-buffer-widened
+    (treesit-major-mode-setup))
   (setq-local font-lock-fontify-region-function
               #'md-ts--font-lock-fontify-region)
   (md-ts--set-hide-markup md-ts-hide-markup)
@@ -3595,11 +3647,12 @@ buffers still clean old md-ts properties when the mode starts."
     ;; Global markdown-inline parser with empty ranges: prevents
     ;; Emacs from auto-creating a full-buffer parser.  Actual
     ;; fontification uses local per-node parsers (see range settings).
-    (let ((inline-parser (treesit-parser-create 'markdown-inline)))
-      (treesit-parser-set-included-ranges
-       inline-parser `((,(point-min) . ,(point-min)))))
-    (treesit-parser-create 'markdown)
-    (md-ts-setup)))
+    (md-ts--with-base-buffer-widened
+      (let ((inline-parser (md-ts--parser-create 'markdown-inline)))
+        (treesit-parser-set-included-ranges
+         inline-parser `((,(point-min) . ,(point-min)))))
+      (md-ts--parser-create 'markdown)
+      (md-ts-setup))))
 
 (derived-mode-add-parents 'md-ts-mode '(markdown-mode))
 
