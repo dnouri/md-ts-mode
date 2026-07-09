@@ -129,4 +129,4 @@ install-hooks:
 	@echo "Git hooks installed (using hooks/)"
 
 clean:
-	@rm -f *.elc test/*.elc
+	@rm -f *.elc test/*.elc scripts/*.elc

@@ -1064,7 +1064,7 @@ when definitions elsewhere in the buffer change.  When
 STATIC-TARGET is non-nil, activation first revalidates the current
 bare-link text at the button position."
   (when (and (< beg end) (not (string-empty-p url)))
-    (if (or (md-ts--foreign-button-in-region-p beg end)
+    (if (or (md-ts--foreign-button-shared-text-blocker-in-region-p beg end)
             (md-ts--foreign-interactive-property-in-region-p beg end))
         (md-ts--remove-link-button-properties beg end)
       (unless static-target
@@ -1775,20 +1775,41 @@ all font-lock state."
                    overlay))
             (overlays-in beg end)))
 
+(defun md-ts--foreign-text-button-in-region-p (beg end)
+  "Return non-nil if a foreign text-property button overlaps BEG to END."
+  (let ((pos beg)
+        found)
+    (while (and (< pos end) (not found))
+      (cond
+       ((not (md-ts--text-button-at-p pos))
+        (setq pos
+              (min (or (next-single-property-change
+                        pos 'button nil end)
+                       end)
+                   (or (next-single-property-change
+                        pos 'category nil end)
+                       end))))
+       ((md-ts--owned-text-link-button-p pos)
+        (pcase-let ((`(,_span-beg . ,span-end)
+                     (md-ts--property-span pos 'button)))
+          (setq pos (min end (max (1+ pos) span-end)))))
+       (t
+        (setq found t))))
+    found))
+
 (defun md-ts--foreign-button-in-region-p (beg end)
   "Return non-nil if a non-md-ts button overlaps BEG to END."
   (or (md-ts--foreign-overlay-button-in-region-p beg end)
-      (let ((pos beg)
-            found)
-        (while (and (< pos end) (not found))
-          (if-let* ((button (button-at pos)))
-              (if (md-ts--owned-link-button-p button)
-                  (setq pos (min end (max (1+ pos) (button-end button))))
-                (setq found button))
-            (setq pos (or (next-single-property-change
-                           pos 'button nil end)
-                          end))))
-        found)))
+      (md-ts--foreign-text-button-in-region-p beg end)))
+
+(defun md-ts--foreign-button-shared-text-blocker-in-region-p (beg end)
+  "Return non-nil if foreign buttons in BEG to END block shared text props.
+Overlay buttons are buffer-local, unlike text properties.  In an
+indirect buffer, a local foreign overlay should not remove or block
+shared md-ts text-button properties in the base buffer."
+  (or (md-ts--foreign-text-button-in-region-p beg end)
+      (and (not (buffer-base-buffer))
+           (md-ts--foreign-overlay-button-in-region-p beg end))))
 
 (defun md-ts--property-span (pos prop)
   "Return the span of PROP around POS as a cons cell."
@@ -2289,26 +2310,43 @@ left intact."
     (md-ts--range-intersects-sorted-ranges-p
      beg end md-ts--bare-link-unsafe-context-ranges))))
 
+(defun md-ts--overlay-button-in-region-p (beg end)
+  "Return non-nil when any real overlay button overlaps BEG to END."
+  (seq-some (lambda (overlay)
+              (and (overlay-get overlay 'button)
+                   (overlay-get overlay 'category)
+                   overlay))
+            (overlays-in beg end)))
+
+(defun md-ts--text-button-in-region-p (beg end)
+  "Return non-nil when any text-property button overlaps BEG to END."
+  (let ((pos beg)
+        found)
+    (while (and (< pos end) (not found))
+      (if (md-ts--text-button-at-p pos)
+          (setq found t)
+        (setq pos
+              (min (or (next-single-property-change
+                        pos 'button nil end)
+                       end)
+                   (or (next-single-property-change
+                        pos 'category nil end)
+                       end)))))
+    found))
+
 (defun md-ts--button-overlaps-region-p (beg end)
   "Return non-nil when any real text or overlay button overlaps BEG to END."
-  (or (seq-some (lambda (overlay)
-                  (and (overlay-get overlay 'button)
-                       (overlay-get overlay 'category)
-                       overlay))
-                (overlays-in beg end))
-      (let ((pos beg)
-            found)
-        (while (and (< pos end) (not found))
-          (if (md-ts--text-button-at-p pos)
-              (setq found t)
-            (setq pos
-                  (min (or (next-single-property-change
-                            pos 'button nil end)
-                           end)
-                       (or (next-single-property-change
-                            pos 'category nil end)
-                           end)))))
-        found)))
+  (or (md-ts--overlay-button-in-region-p beg end)
+      (md-ts--text-button-in-region-p beg end)))
+
+(defun md-ts--button-shared-text-blocker-in-region-p (beg end)
+  "Return non-nil if buttons in BEG to END block shared md-ts text props.
+Overlay buttons are buffer-local, unlike text properties.  In an
+indirect buffer, a local overlay should not prevent writing shared
+md-ts text-button properties needed by the base buffer."
+  (or (md-ts--text-button-in-region-p beg end)
+      (and (not (buffer-base-buffer))
+           (md-ts--overlay-button-in-region-p beg end))))
 
 (defconst md-ts--bare-link-terminal-punctuation '(?. ?, ?\; ?\: ?\! ?\?)
   "Prose punctuation trimmed from the end of bare link matches.")
@@ -2511,14 +2549,15 @@ valid email-like token would make the practical `mailto:' candidate valid."
 (defun md-ts--bare-link-candidate-valid-p (beg end target &optional check-overlap)
   "Return non-nil when BEG..END is a valid bare-link candidate.
 TARGET is the candidate activation target.  When CHECK-OVERLAP is
-t, reject candidates that overlap any existing button.  When it is
-`foreign', reject only candidates that overlap non-md-ts buttons."
+t, reject candidates that overlap any shared text-button blocker.
+When it is `foreign', reject only candidates that overlap non-md-ts
+buttons."
   (and (< beg end)
        (not (string-empty-p target))
        (not (pcase check-overlap
               ('foreign (md-ts--foreign-button-in-region-p beg end))
               ((pred identity)
-               (or (md-ts--button-overlaps-region-p beg end)
+               (or (md-ts--button-shared-text-blocker-in-region-p beg end)
                    (md-ts--foreign-interactive-property-in-region-p
                     beg end)))))
        (not (md-ts--bare-link-unsafe-context-p beg end))))
@@ -2658,7 +2697,8 @@ bare `mailto:' form can own URL-like text inside its query."
            (end (aref range 1))
            (target (aref range 3)))
       (when (and (md-ts--regions-intersect-p beg end apply-beg apply-end)
-                 (not (md-ts--button-overlaps-region-p beg end)))
+                 (not (md-ts--button-shared-text-blocker-in-region-p
+                       beg end)))
         (md-ts--fontify-bare-link beg end target)))))
 
 (defun md-ts--bare-mailto-uri-embedded-in-scheme-token-p (beg)
