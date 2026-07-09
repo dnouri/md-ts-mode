@@ -904,7 +904,7 @@ inline parser ranges cause the first range's faces to be dropped."
                   "https://example.com/?a&AMP;b")
                  "https://example.com/?a&b"))
   (should (equal (md-ts--link-destination-url
-                  "docs/file.md&num;intro")
+                  "docs/file.md&#35;intro")
                  "docs/file.md#intro"))
   (should (equal (md-ts--link-destination-url
                   "https://example.com/?a&#38;b")
@@ -912,11 +912,18 @@ inline parser ranges cause the first range's faces to be dropped."
   (should (equal (md-ts--link-destination-url
                   "https://example.com/?a&#x26;b")
                  "https://example.com/?a&b"))
-  ;; Unknown, non-HTML, and malformed numeric references are not
-  ;; CommonMark character references, so the decoder leaves them literal.
+  (should (equal (md-ts--link-destination-url
+                  "https://example.com/?a\\&amp;b")
+                 "https://example.com/?a&amp;b"))
+  ;; Unknown names and HTML5 names outside md-ts-mode's small named
+  ;; set are intentionally left literal; numeric references cover
+  ;; arbitrary Unicode characters without embedding a full HTML5 table.
   (should (equal (md-ts--link-destination-url
                   "https://example.com/?a&bogus;b")
                  "https://example.com/?a&bogus;b"))
+  (should (equal (md-ts--link-destination-url
+                  "https://example.com/?a&copy;b")
+                 "https://example.com/?a&copy;b"))
   (should (equal (md-ts--link-destination-url
                   "https://example.com/?a&to;b")
                  "https://example.com/?a&to;b"))
@@ -969,7 +976,7 @@ inline parser ranges cause the first range's faces to be dropped."
     (should (equal opened url))))
 
 (ert-deftest md-ts-test-link-inline-character-reference-destination ()
-  "Inline destinations should decode Markdown character references."
+  "Inline destinations should decode supported character references."
   (dolist (raw '("https://example.com/?a&amp;b"
                  "https://example.com/?a&AMP;b"
                  "https://example.com/?a&#38;b"
@@ -1130,9 +1137,9 @@ inline parser ranges cause the first range's faces to be dropped."
       (md-ts-test--push-button-at-search text "notes"))
     (should (equal-including-properties opened "docs/a#b&c.md"))))
 
-(ert-deftest md-ts-test-link-inline-named-hash-entity-starts-fragment ()
-  "Entity-decoded hashes should behave as normal fragment separators."
-  (let ((text "Open [notes](docs/file.md&num;intro) please.\n")
+(ert-deftest md-ts-test-link-inline-numeric-hash-entity-starts-fragment ()
+  "Numeric entity-decoded hashes are normal fragment separators."
+  (let ((text "Open [notes](docs/file.md&#35;intro) please.\n")
         opened)
     (should (equal (md-ts-test--help-echo-at-search text "notes")
                    "docs/file.md#intro"))
@@ -1141,7 +1148,7 @@ inline parser ranges cause the first range's faces to be dropped."
                  (setq opened file)))
               ((symbol-function 'browse-url)
                (lambda (&rest _args)
-                 (ert-fail "browse-url called for named hash entity"))))
+                 (ert-fail "browse-url called for numeric hash entity"))))
       (md-ts-test--push-button-at-search text "notes"))
     (should (equal opened "docs/file.md"))))
 
@@ -1570,7 +1577,7 @@ inline parser ranges cause the first range's faces to be dropped."
     (should (equal opened "https://python.org"))))
 
 (ert-deftest md-ts-test-link-reference-character-reference-destination ()
-  "Reference destinations should decode Markdown character references."
+  "Reference destinations should decode supported character references."
   (dolist (raw '("https://example.com/?a&amp;b"
                  "https://example.com/?a&AMP;b"
                  "https://example.com/?a&#38;b"
@@ -1617,10 +1624,10 @@ inline parser ranges cause the first range's faces to be dropped."
       (md-ts-test--push-button-at-search text "Doc"))
     (should (equal-including-properties opened "docs/a#b&c.md"))))
 
-(ert-deftest md-ts-test-link-reference-named-hash-entity-starts-fragment ()
-  "Entity-decoded reference hashes should be fragment separators."
+(ert-deftest md-ts-test-link-reference-numeric-hash-entity-starts-fragment ()
+  "Numeric entity-decoded reference hashes are fragment separators."
   (let ((text (concat "See [Doc][hash].\n\n"
-                      "[hash]: docs/file.md&num;intro\n"))
+                      "[hash]: docs/file.md&#35;intro\n"))
         opened)
     (should (equal (md-ts-test--help-echo-at-search text "Doc")
                    "docs/file.md#intro"))
