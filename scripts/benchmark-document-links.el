@@ -26,7 +26,7 @@
 
 (defun md-ts-bench--env-paths (name)
   "Return path entries from environment variable NAME."
-  (when-let ((value (getenv name)))
+  (when-let* ((value (getenv name)))
     (split-string value path-separator t)))
 
 (defun md-ts-bench--add-existing-tree-sitter-paths ()

@@ -370,19 +370,13 @@ BEG, END, OFFSET, and RANGE-FN are passed through."
                 (md-ts--treesit-query-range
                  parser query beg end offset range-fn)))))
 
-;; WORKAROUND: tree-sitter < 0.25.0 integer underflow in
-;; `length_sub'/`point_sub'.  After an edit outside a local parser's
-;; included range, unsigned subtraction underflows, corrupting point
-;; fields and making incremental reparse silently produce zero query
-;; matches.  Fixed upstream by commit f3d50f27 (ts 0.25.0, 2025-01-31).
+;; Local parser refresh.
 ;;
-;; Workaround: replace the parser with a fresh one so
-;; `ts_parser_parse' does a full (non-incremental) reparse.
-;;
-;; REMOVAL: once tree-sitter >= 0.25.0 can be assumed, delete this
-;; function and its two call-sites (in
-;; `md-ts--treesit--update-ranges-local' and
-;; `md-ts--refresh-local-parsers').
+;; Supported runtimes no longer need the old tree-sitter < 0.25.0
+;; underflow workaround that first motivated this code.  Keep the
+;; refresh path, however, so Emacs 29/30 shims and Emacs 31's native
+;; range updater do not reuse a local parser whose overlay timestamp is
+;; older than the buffer text it parses.
 (defun md-ts--recreate-local-parser (ov old-parser)
   "Delete OLD-PARSER on OV and create a fresh replacement.
 Return the new parser, or nil if creation fails."
@@ -523,9 +517,8 @@ If BEG and END are non-nil, only update ranges in that region."
 (unless md-ts--range-shims-installed
   (defun md-ts--refresh-local-parsers (&optional beg end)
     "Replace local parsers whose buffer was modified since last update.
-Workaround for tree-sitter < 0.25.0 integer underflow — see
-`md-ts--recreate-local-parser' for details.
-Must run as :before advice on `treesit-update-ranges'."
+Refresh stale local parsers before Emacs 31's native range updater
+reuses them.  Must run as :before advice on `treesit-update-ranges'."
     (when (derived-mode-p 'md-ts-mode)
       (let ((tick (buffer-chars-modified-tick))
             (beg (or beg (point-min)))
@@ -1027,27 +1020,92 @@ Markdown syntax."
     ("apos" . "'"))
   "Minimal named character references decoded in link destinations.")
 
+(defconst md-ts--character-reference-regexp
+  "&\\(#[xX][[:xdigit:]]+\\|#[0-9]+\\|[[:alpha:]][[:alnum:]]*\\);"
+  "Regexp matching character references decoded in link destinations.")
+
+(defun md-ts--character-reference-digit-value (char)
+  "Return the numeric value of hexadecimal digit CHAR, or nil."
+  (cond
+   ((<= ?0 char ?9) (- char ?0))
+   ((<= ?a char ?f) (+ 10 (- char ?a)))
+   ((<= ?A char ?F) (+ 10 (- char ?A)))))
+
+(defun md-ts--valid-character-reference-codepoint-p (codepoint)
+  "Return non-nil if CODEPOINT is a safe Unicode scalar value."
+  (and (integerp codepoint)
+       (< 0 codepoint)
+       (<= codepoint #x10FFFF)
+       (not (<= #xD800 codepoint #xDFFF))
+       (characterp codepoint)))
+
+(defun md-ts--decode-numeric-character-reference (digits radix reference)
+  "Decode DIGITS in RADIX as a character, or return REFERENCE."
+  (let ((codepoint 0)
+        (pos 0)
+        (limit #x10FFFF)
+        digit)
+    (catch 'invalid
+      (while (< pos (length digits))
+        (setq digit (md-ts--character-reference-digit-value
+                     (aref digits pos)))
+        (when (or (null digit) (>= digit radix))
+          (throw 'invalid reference))
+        (when (> codepoint (/ (- limit digit) radix))
+          (throw 'invalid reference))
+        (setq codepoint (+ (* codepoint radix) digit)
+              pos (1+ pos)))
+      (if (md-ts--valid-character-reference-codepoint-p codepoint)
+          (condition-case nil
+              (char-to-string codepoint)
+            (error reference))
+        reference))))
+
+(defun md-ts--decode-character-reference (reference)
+  "Decode one character REFERENCE, or return it unchanged."
+  (let ((body (substring reference 1 -1)))
+    (cond
+     ((and (> (length body) 2)
+           (eq (aref body 0) ?#)
+           (memq (aref body 1) '(?x ?X)))
+      (md-ts--decode-numeric-character-reference
+       (substring body 2) 16 reference))
+     ((and (> (length body) 1)
+           (eq (aref body 0) ?#))
+      (md-ts--decode-numeric-character-reference
+       (substring body 1) 10 reference))
+     (t (or (alist-get body md-ts--character-reference-name-alist
+                       nil nil #'string=)
+            reference)))))
+
 (defun md-ts--decode-character-references (text)
   "Decode minimal CommonMark character references in TEXT.
 This is intentionally scoped to link destinations/autolinks and
-supports numeric references plus the core XML/HTML named references."
-  (replace-regexp-in-string
-   "&\\(#x[[:xdigit:]]+\\|#[0-9]+\\|[[:alpha:]][[:alnum:]]*\\);"
-   (lambda (reference)
-     (let ((body (substring reference 1 -1)))
-       (cond
-        ((string-prefix-p "#x" body)
-         (condition-case nil
-             (char-to-string (string-to-number (substring body 2) 16))
-           (error reference)))
-        ((string-prefix-p "#" body)
-         (condition-case nil
-             (char-to-string (string-to-number (substring body 1) 10))
-           (error reference)))
-        (t (or (alist-get body md-ts--character-reference-name-alist
-                          nil nil #'string=)
-               reference)))))
-   text t t))
+supports numeric references plus the core XML/HTML named references.
+References whose ampersand came from a Markdown backslash escape
+are left literal."
+  (let ((search-start 0)
+        (copy-start 0)
+        (pieces nil)
+        changed)
+    (while (string-match md-ts--character-reference-regexp text search-start)
+      (let ((match-beg (match-beginning 0))
+            (match-end (match-end 0)))
+        (if (get-text-property match-beg md-ts--markdown-escaped-property
+                               text)
+            (setq search-start match-end)
+          (let* ((reference (match-string 0 text))
+                 (decoded (md-ts--decode-character-reference reference)))
+            (if (equal decoded reference)
+                (setq search-start match-end)
+              (setq changed t)
+              (push (substring text copy-start match-beg) pieces)
+              (push decoded pieces)
+              (setq copy-start match-end
+                    search-start match-end))))))
+    (if changed
+        (apply #'concat (nreverse (cons (substring text copy-start) pieces)))
+      text)))
 
 (defun md-ts--link-destination-url (destination)
   "Return the URL represented by raw link DESTINATION text.
@@ -2443,14 +2501,14 @@ cleanup there unless they intentionally want to mutate shared text."
   (with-silent-modifications
     (let ((inhibit-read-only t))
       ;; Indirect buffers share text properties with their base buffer.  Avoid
-      ;; destructive unfontification there; paired refontification in the base
-      ;; buffer owns shared md-ts text properties.
+      ;; destructive md-ts side-effect cleanup there, but still let font-lock
+      ;; remove its managed properties (faces, etc.) from the edited text.
       (unless (buffer-base-buffer)
         (md-ts--remove-invisible-properties beg end)
         (md-ts--remove-display-properties beg end)
         (md-ts--remove-bare-link-button-properties beg end)
-        (md-ts--remove-link-button-properties beg end)
-        (font-lock-default-unfontify-region beg end)))))
+        (md-ts--remove-link-button-properties beg end))
+      (font-lock-default-unfontify-region beg end))))
 
 (defun md-ts--treesit-query-specs-for-node-types (specs capture)
   "Return tree-sitter query SPECS that capture node types as CAPTURE."

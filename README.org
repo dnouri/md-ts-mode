@@ -59,8 +59,12 @@ such as =a\#b.md= are literal filename characters.
 ** Requirements
 
 - GNU Emacs 29.1 or later, built with tree-sitter support.
-- libtree-sitter runtime 0.25 or later.  Older distro runtimes such as
-  0.22 are not supported because they mis-handle disjoint parser ranges.
+- A supported Emacs/libtree-sitter runtime combination:
+  - Emacs 29/30 with libtree-sitter 0.25.x.
+  - Emacs 31/development snapshots with libtree-sitter 0.25.x or 0.26.x.
+  Older distro runtimes such as 0.22 are not supported because they
+  mis-handle disjoint parser ranges; Emacs 29/30 with libtree-sitter
+  0.26+ is not currently supported.
 - Tree-sitter grammars: ~markdown~ and ~markdown-inline~ from
   [[https://github.com/tree-sitter-grammars/tree-sitter-markdown][tree-sitter-markdown]] (version 0.4.1 or compatible).
 
@@ -134,8 +138,8 @@ Run ~make check~ before sending changes.  ~make perf~ runs advisory
 link fontification benchmarks; compare =RESULT= lines from runs on the
 same machine rather than treating them as pass/fail thresholds.  Benchmark
 =RESULT= lines include tracked dirty/untracked state and link-artifact
-counts; ~make perf-smoke~ runs a tiny runtime smoke and fails when the
-Markdown grammars are unavailable.
+counts.  ~make perf-smoke~ validates the local grammar and link-artifact
+path only; CI, not this smoke target, covers the supported runtime matrix.
 
 
 ** Compatibility
@@ -155,14 +159,14 @@ signatures changed in Emacs 30 (~treesit-parser-create~,
 
 On Emacs 31 all guards are false and no shims are defined.
 
-Tested on Emacs 29.4, 30.2, and development snapshot (31).
-CI probes libtree-sitter 0.25.10 on those Emacs versions, and also
-probes libtree-sitter 0.26 on snapshot.  CI intentionally does not run
-against the GitHub image's default tree-sitter runtime when it is older
-than the 0.25 minimum.
-Emacs 29/30 with libtree-sitter 0.26+ is not currently a supported
-combination for ~md-ts-mode~, because upstream Emacs only gained that
-runtime compatibility later.
+Supported combinations are Emacs 29/30 with libtree-sitter 0.25.x, and
+Emacs 31/development snapshots with libtree-sitter 0.25.x or 0.26.x.
+CI probes libtree-sitter 0.25.10 on Emacs 29.4, 30.2, and snapshot, and
+also probes libtree-sitter 0.26 on snapshot.  CI intentionally does not
+run against the GitHub image's default tree-sitter runtime when it is
+older than the 0.25 minimum.  Emacs 29/30 with libtree-sitter 0.26+ is
+not currently a supported combination for ~md-ts-mode~, because upstream
+Emacs only gained that runtime compatibility later.
 
 
 ** Acknowledgments

@@ -956,10 +956,28 @@ inline parser ranges cause the first range's faces to be dropped."
   (should (equal (md-ts--link-destination-url "C:\\path")
                  "C:\\path")))
 
+(ert-deftest md-ts-test-link-destination-character-reference-edge-cases ()
+  "Character references in destinations decode safely and deterministically."
+  (should (equal (md-ts--link-destination-url
+                  "https://e.test/a&#x21;&#X21;&#33;")
+                 "https://e.test/a!!!"))
+  (should (equal (md-ts--link-destination-url
+                  "https://e.test/?q=\\&amp;&ok=1")
+                 "https://e.test/?q=&amp;&ok=1"))
+  (should (equal (md-ts--link-destination-url
+                  "https://e.test/&#xD800;&#1114112;&#0;&#999999999999999999999;")
+                 "https://e.test/&#xD800;&#1114112;&#0;&#999999999999999999999;")))
+
 (ert-deftest md-ts-test-link-inline-character-reference-destination ()
   "Inline link destinations decode Markdown character references."
   (let ((text "Visit [here](https://e.test?a=1&amp;b=2) now.\n")
         (url "https://e.test?a=1&b=2"))
+    (should (equal (md-ts-test--help-echo-at-search text "here") url))))
+
+(ert-deftest md-ts-test-link-inline-escaped-character-reference-destination ()
+  "Escaped ampersands in inline link destinations stay literal."
+  (let ((text "Visit [here](https://e.test?q=\\&amp;&ok=1) now.\n")
+        (url "https://e.test?q=&amp;&ok=1"))
     (should (equal (md-ts-test--help-echo-at-search text "here") url))))
 
 (ert-deftest md-ts-test-link-inline-button ()
@@ -4186,6 +4204,31 @@ inline parser ranges cause the first range's faces to be dropped."
                 (push-button link-pos))
               (should (equal opened "https://example.com/path"))
               (should-not overlay-called))))
+      (when (buffer-live-p indirect)
+        (kill-buffer indirect))
+      (kill-buffer base))))
+
+(ert-deftest md-ts-test-indirect-edit-clears-stale-managed-face ()
+  "Editing Markdown in an indirect buffer should clear stale faces."
+  (let ((base (md-ts-test--fontify "**bold**\n"))
+        indirect)
+    (unwind-protect
+        (progn
+          (setq indirect (make-indirect-buffer base " *md-ts-indirect*" t))
+          (with-current-buffer indirect
+            (goto-char (point-min))
+            (search-forward "bold")
+            (let ((face (get-text-property (match-beginning 0) 'face)))
+              (should (or (eq face 'bold)
+                          (and (listp face) (memq 'bold face)))))
+            (goto-char (point-min))
+            (delete-char 2)
+            (search-forward "**")
+            (delete-region (match-beginning 0) (match-end 0))
+            (font-lock-ensure (point-min) (point-max))
+            (goto-char (point-min))
+            (search-forward "bold")
+            (should-not (get-text-property (match-beginning 0) 'face))))
       (when (buffer-live-p indirect)
         (kill-buffer indirect))
       (kill-buffer base))))
@@ -7559,7 +7602,7 @@ Returns the same kind of (TEXT FACE) span list as the batch variant."
 
 (ert-deftest md-ts-test-fixture-snapshot ()
   "Fontified fixture.md must match the recorded face snapshot.
-Run `make snapshot' to regenerate test/fixture-faces.eld after
+Run `make snapshot' to regenerate the current Emacs snapshot after
 intentional changes."
   (let* ((snapshot-path (md-ts-test--snapshot-path))
          (expected (with-temp-buffer
@@ -7590,9 +7633,8 @@ test/fixture-visible.txt."
 
 ;;; Streamed (line-by-line) fixture tests
 ;;
-;; These tests guard against a tree-sitter < 0.25.0 integer underflow
-;; bug that causes local parsers to silently produce zero query matches
-;; after incremental reparse.  See `md-ts--recreate-local-parser'.
+;; These tests guard local-parser refresh by comparing streamed edits with
+;; batch fontification.  See `md-ts--recreate-local-parser'.
 
 (ert-deftest md-ts-test-fixture-snapshot-streamed ()
   "Streaming line-by-line must produce the same faces as batch.
