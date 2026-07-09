@@ -6082,6 +6082,50 @@ inline parser ranges cause the first range's faces to be dropped."
   "`md-ts-mode-map' should keep `text-mode-map' as an ancestor."
   (should (eq (keymap-parent md-ts-mode-map) text-mode-map)))
 
+(defun md-ts-test--invisible-includes-p (value member)
+  "Return non-nil when invisible VALUE includes MEMBER."
+  (if (listp value)
+      (memq member value)
+    (eq value member)))
+
+(ert-deftest md-ts-test-hide-markup-fontify-preserves-foreign-invisible-symbol ()
+  "Fontification should add md-ts invisibility without clobbering foreign symbols."
+  (let ((md-ts-hide-markup t)
+        (buf (generate-new-buffer " *md-ts-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "# Heading\n")
+          (put-text-property (point-min) (1+ (point-min))
+                             'invisible 'foreign-hide)
+          (md-ts-mode)
+          (font-lock-ensure)
+          (let ((invisible (get-text-property (point-min) 'invisible)))
+            (should (md-ts-test--invisible-includes-p invisible
+                                                      'md-ts--markup))
+            (should (md-ts-test--invisible-includes-p invisible
+                                                      'foreign-hide))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-hide-markup-fontify-preserves-foreign-invisible-list ()
+  "Fontification should add md-ts invisibility to composite foreign values."
+  (let ((md-ts-hide-markup t)
+        (buf (generate-new-buffer " *md-ts-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "# Heading\n")
+          (put-text-property (point-min) (1+ (point-min))
+                             'invisible '(foreign-hide other-hide))
+          (md-ts-mode)
+          (font-lock-ensure)
+          (let ((invisible (get-text-property (point-min) 'invisible)))
+            (should (md-ts-test--invisible-includes-p invisible
+                                                      'md-ts--markup))
+            (should (md-ts-test--invisible-includes-p invisible
+                                                      'foreign-hide))
+            (should (md-ts-test--invisible-includes-p invisible
+                                                      'other-hide))))
+      (kill-buffer buf))))
+
 (ert-deftest md-ts-test-hide-markup-unfontify-preserves-foreign-invisible ()
   "Unfontification should remove only md-ts-owned invisible text."
   (let ((md-ts-hide-markup t)
@@ -6094,6 +6138,22 @@ inline parser ranges cause the first range's faces to be dropped."
                    (point-min) (point-max))
           (should (eq (get-text-property (point-min) 'invisible)
                       'foreign-hide)))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-hide-markup-unfontify-cleans-composite-invisible ()
+  "Unfontification should remove md-ts invisibility from composite values."
+  (let ((buf (md-ts-test--fontify "# Heading\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (put-text-property (point-min) (1+ (point-min))
+                             'invisible '(md-ts--markup foreign-hide))
+          (funcall font-lock-unfontify-region-function
+                   (point-min) (point-max))
+          (let ((invisible (get-text-property (point-min) 'invisible)))
+            (should-not (md-ts-test--invisible-includes-p invisible
+                                                          'md-ts--markup))
+            (should (md-ts-test--invisible-includes-p invisible
+                                                      'foreign-hide))))
       (kill-buffer buf))))
 
 (ert-deftest md-ts-test-hide-markup-indirect-unfontify-preserves-base-invisible ()
@@ -6149,6 +6209,52 @@ inline parser ranges cause the first range's faces to be dropped."
           (search-forward "Heading")
           (should (eq (get-text-property (match-beginning 0) 'invisible)
                       'foreign-hide)))
+      (when (buffer-live-p indirect)
+        (kill-buffer indirect))
+      (kill-buffer base))))
+
+(ert-deftest md-ts-test-hide-markup-indirect-disabled-preserves-base-hidden ()
+  "Indirect refontification should follow base hide-markup when disabled locally."
+  (let ((base (generate-new-buffer " *md-ts-test*"))
+        indirect)
+    (unwind-protect
+        (with-current-buffer base
+          (insert "# Heading\n")
+          (md-ts-mode)
+          (setq-local md-ts-hide-markup t)
+          (font-lock-ensure)
+          (should (eq (get-text-property (point-min) 'invisible)
+                      'md-ts--markup))
+          (setq indirect (make-indirect-buffer base " *md-ts-indirect*" t))
+          (with-current-buffer indirect
+            (setq-local md-ts-hide-markup nil)
+            (font-lock-flush (point-min) (point-max))
+            (font-lock-ensure))
+          (should (eq (get-text-property (point-min) 'invisible)
+                      'md-ts--markup)))
+      (when (buffer-live-p indirect)
+        (kill-buffer indirect))
+      (kill-buffer base))))
+
+(ert-deftest md-ts-test-hide-markup-indirect-enabled-keeps-base-visible ()
+  "Indirect refontification should not hide shared base text when base is visible."
+  (let ((base (generate-new-buffer " *md-ts-test*"))
+        indirect)
+    (unwind-protect
+        (with-current-buffer base
+          (insert "# Heading\n")
+          (md-ts-mode)
+          (setq-local md-ts-hide-markup nil)
+          (font-lock-ensure)
+          (should-not (get-text-property (point-min) 'invisible))
+          (setq indirect (make-indirect-buffer base " *md-ts-indirect*" t))
+          (with-current-buffer indirect
+            (setq-local md-ts-hide-markup t)
+            (font-lock-flush (point-min) (point-max))
+            (font-lock-ensure))
+          (should-not (md-ts-test--invisible-includes-p
+                       (get-text-property (point-min) 'invisible)
+                       'md-ts--markup)))
       (when (buffer-live-p indirect)
         (kill-buffer indirect))
       (kill-buffer base))))

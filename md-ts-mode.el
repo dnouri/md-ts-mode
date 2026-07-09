@@ -751,7 +751,9 @@ maps to tree-sitter language `cpp'.")
 
 (defcustom md-ts-hide-markup nil
   "Non-nil means hide Markdown markup delimiters in this buffer.
-Visible link text remains activatable when link markup is hidden."
+Visible link text remains activatable when link markup is hidden.
+In indirect buffers, shared hide-markup text-property side effects
+follow the base buffer's value."
   :type 'boolean
   :safe #'booleanp
   :group 'md-ts)
@@ -852,6 +854,58 @@ their own scaling."
 
 ;;; Font-lock
 
+(defun md-ts--hide-markup-enabled-p ()
+  "Return non-nil when hide-markup side effects should be written.
+Because text properties are shared with indirect buffers, indirect
+buffers use their base buffer's `md-ts-hide-markup' value."
+  (if-let* ((base (buffer-base-buffer)))
+      (buffer-local-value 'md-ts-hide-markup base)
+    md-ts-hide-markup))
+
+(defun md-ts--invisible-value-includes-p (value member)
+  "Return non-nil when invisible VALUE includes MEMBER."
+  (if (listp value)
+      (memq member value)
+    (eq value member)))
+
+(defun md-ts--add-invisible-value-member (value member)
+  "Return invisible VALUE with MEMBER added, preserving foreign values."
+  (cond
+   ((null value) member)
+   ;; A bare t has special unconditional-invisibility semantics; keep it.
+   ((eq value t) value)
+   ((eq value member) value)
+   ((listp value)
+    (if (memq member value)
+        value
+      (cons member value)))
+   (t (list member value))))
+
+(defun md-ts--remove-invisible-value-member (value member)
+  "Return invisible VALUE with MEMBER removed, preserving foreign values."
+  (cond
+   ((eq value member) nil)
+   ((and (listp value) (memq member value))
+    (let ((remaining (delq member (copy-sequence value))))
+      (cond
+       ((null remaining) nil)
+       ((null (cdr remaining)) (car remaining))
+       (t remaining))))
+   (t value)))
+
+(defun md-ts--add-markup-invisible-property (beg end)
+  "Add md-ts markup invisibility from BEG to END preserving foreign values."
+  (let ((pos beg))
+    (while (< pos end)
+      (let* ((next (or (next-single-property-change pos 'invisible nil end)
+                       end))
+             (value (get-text-property pos 'invisible))
+             (new-value (md-ts--add-invisible-value-member
+                         value 'md-ts--markup)))
+        (unless (eq value new-value)
+          (put-text-property pos next 'invisible new-value))
+        (setq pos next)))))
+
 (defun md-ts--fontify-delimiter (node override start end &rest _)
   "Fontify delimiter NODE and optionally hide its markup.
 OVERRIDE, START, and END are passed to `treesit-fontify-with-override'."
@@ -868,15 +922,14 @@ OVERRIDE, START, and END are passed to `treesit-fontify-with-override'."
                      (not (eq (char-after node-start) ?>))))
       (treesit-fontify-with-override
        node-start node-end 'md-ts-delimiter override start end)
-      (when md-ts-hide-markup
+      (when (md-ts--hide-markup-enabled-p)
         (let ((hide-end node-end))
           ;; For ATX heading markers, also hide the trailing space.
           ;; For setext underlines, also hide the trailing newline.
           (when (or (string-prefix-p "atx_h" type)
                     (string-prefix-p "setext_h" type))
             (setq hide-end (min (1+ hide-end) (point-max))))
-          (put-text-property node-start hide-end
-                             'invisible 'md-ts--markup))))))
+          (md-ts--add-markup-invisible-property node-start hide-end))))))
 
 (defun md-ts--fontify-thematic-break (node override start end &rest _)
   "Fontify thematic break NODE as a horizontal rule.
@@ -944,14 +997,6 @@ backslash escapes by `md-ts--markdown-unescape'."
           (setq pos (1+ pos))
         (setq fragment-start pos)))
     fragment-start))
-
-(defun md-ts--local-link-file (destination)
-  "Return the file part of local link DESTINATION.
-For local paths with a trailing #fragment, remove the fragment.
-Heading navigation for the fragment is intentionally deferred."
-  (if-let* ((fragment-start (md-ts--local-link-fragment-start destination)))
-      (substring destination 0 fragment-start)
-    destination))
 
 (defun md-ts--markdown-unescape (text)
   "Return TEXT with basic Markdown backslash escapes decoded.
@@ -1263,11 +1308,9 @@ angle brackets.  OVERRIDE, START, and END are passed to
      node-start (1+ node-start) 'shadow override start end)
     (treesit-fontify-with-override
      (1- node-end) node-end 'shadow override start end)
-    (when md-ts-hide-markup
-      (put-text-property node-start (1+ node-start)
-                         'invisible 'md-ts--markup)
-      (put-text-property (1- node-end) node-end
-                         'invisible 'md-ts--markup))))
+    (when (md-ts--hide-markup-enabled-p)
+      (md-ts--add-markup-invisible-property node-start (1+ node-start))
+      (md-ts--add-markup-invisible-property (1- node-end) node-end))))
 
 (defun md-ts--fontify-link-reference-definition-label
     (node override start end &rest _)
@@ -1295,16 +1338,14 @@ OVERRIDE, START, and END are passed to `treesit-fontify-with-override'."
         (treesit-fontify-with-override
          (treesit-node-start child) (treesit-node-end child)
          'shadow override start end)
-        (when md-ts-hide-markup
+        (when (md-ts--hide-markup-enabled-p)
           (cond
            ((member type '("[" "!"))
-            (put-text-property (treesit-node-start child)
-                               (treesit-node-end child)
-                               'invisible 'md-ts--markup))
+            (md-ts--add-markup-invisible-property
+             (treesit-node-start child) (treesit-node-end child)))
            ((string= type "]")
-            (put-text-property (treesit-node-start child)
-                               (treesit-node-end node)
-                               'invisible 'md-ts--markup))))))))
+            (md-ts--add-markup-invisible-property
+             (treesit-node-start child) (treesit-node-end node)))))))))
 
 (defun md-ts--fontify-fenced-code-block (node _override _start _end &rest _)
   "Fontify fenced code block NODE, hiding fence lines when appropriate.
@@ -1313,7 +1354,7 @@ When `md-ts-hide-markup' is non-nil, hides the opening fence line
 \(delimiter + newline) so no phantom blank lines remain.
 The `md-ts-code' face is applied separately via a late-running
 font-lock rule to avoid interfering with embedded language faces."
-  (when md-ts-hide-markup
+  (when (md-ts--hide-markup-enabled-p)
     (let ((block-start (treesit-node-start node))
           (block-end (treesit-node-end node)))
       ;; Find the code_fence_content child — it holds the actual code body.
@@ -1326,16 +1367,15 @@ font-lock rule to avoid interfering with embedded language faces."
                   (content-end (treesit-node-end content-node)))
               ;; Hide opening line: from block start through to content start
               ;; (covers ```, info_string, and the trailing newline)
-              (put-text-property block-start content-start
-                                 'invisible 'md-ts--markup)
+              (md-ts--add-markup-invisible-property
+               block-start content-start)
               ;; Hide closing line: from content end through block-end.
               ;; The fenced_code_block node already includes the trailing
               ;; newline of the closing fence, so block-end is correct.
-              (put-text-property content-end block-end
-                                 'invisible 'md-ts--markup))
+              (md-ts--add-markup-invisible-property
+               content-end block-end))
           ;; Empty code block (no content node): hide the entire block
-          (put-text-property block-start block-end
-                             'invisible 'md-ts--markup))))))
+          (md-ts--add-markup-invisible-property block-start block-end))))))
 
 (defvar md-ts--treesit-settings
   (treesit-font-lock-rules
@@ -1782,21 +1822,10 @@ all font-lock state."
       (md-ts--flush-all-font-lock)))
   (setq md-ts--link-reference-definition-change-p nil))
 
-(defconst md-ts--link-button-properties
-  '(button nil category nil action nil md-ts-link-button nil
-    md-ts-link-help-echo nil md-ts-link-static-target nil
-    md-ts-bare-link-face nil)
-  "Text properties always owned by md-ts link buttons.")
-
 (defconst md-ts--link-button-residual-properties
   '(md-ts-link-button nil md-ts-link-help-echo nil
     md-ts-link-static-target nil md-ts-bare-link-face nil)
   "Md-ts-specific link props that can remain under foreign buttons.")
-
-(defconst md-ts--parsed-link-button-properties
-  '(button nil category nil action nil md-ts-link-button nil
-    md-ts-link-help-echo nil)
-  "Text properties owned by md-ts parsed link buttons.")
 
 (defconst md-ts--parsed-link-button-residual-properties
   '(md-ts-link-button nil md-ts-link-help-echo nil)
@@ -2066,16 +2095,6 @@ properties, but overlays cloned from the base buffer still do."
                      (point-max)))))
     (cons beg end)))
 
-(defun md-ts--remove-stale-link-help-echo-properties (beg end)
-  "Remove md-ts-owned `help-echo' text properties from BEG to END."
-  (let ((pos beg))
-    (while (< pos end)
-      (let ((next (md-ts--next-link-button-property-change pos end)))
-        (when (or (md-ts--stale-link-help-echo-p pos)
-                  (md-ts--legacy-dynamic-text-link-button-p pos))
-          (remove-text-properties pos next '(help-echo nil)))
-        (setq pos next)))))
-
 (defun md-ts--remove-owned-link-button-properties-in-region (beg end
                                                                  residual-props)
   "Remove md-ts-owned link-button properties from BEG to END.
@@ -2338,11 +2357,16 @@ cleanup there unless they intentionally want to mutate shared text."
         (let ((pos (min (max beg (point-min)) (point-max)))
               (limit (min (max end (point-min)) (point-max))))
           (while (< pos limit)
-            (let ((next (or (next-single-property-change
-                             pos 'invisible nil limit)
-                            limit)))
-              (when (eq (get-text-property pos 'invisible) 'md-ts--markup)
-                (remove-text-properties pos next '(invisible nil)))
+            (let* ((next (or (next-single-property-change
+                              pos 'invisible nil limit)
+                             limit))
+                   (value (get-text-property pos 'invisible))
+                   (new-value (md-ts--remove-invisible-value-member
+                               value 'md-ts--markup)))
+              (unless (eq value new-value)
+                (if new-value
+                    (put-text-property pos next 'invisible new-value)
+                  (remove-text-properties pos next '(invisible nil))))
               (setq pos next))))))))
 
 (defun md-ts--font-lock-unfontify-region (beg end)
@@ -2568,11 +2592,6 @@ cleanup there unless they intentionally want to mutate shared text."
                         pos 'category nil end)
                        end)))))
     found))
-
-(defun md-ts--button-overlaps-region-p (beg end)
-  "Return non-nil when any real text or overlay button overlaps BEG to END."
-  (or (md-ts--overlay-button-in-region-p beg end)
-      (md-ts--text-button-in-region-p beg end)))
 
 (defun md-ts--button-shared-text-blocker-in-region-p (beg end)
   "Return non-nil if buttons in BEG to END block shared md-ts text props.
@@ -3138,7 +3157,7 @@ cons of markers in shared buffer coordinates.")
 
 (defun md-ts--font-lock-side-effect-node-queries ()
   "Return queries for nodes whose callbacks may write past requested bounds."
-  `((markdown . (,@(when md-ts-hide-markup
+  `((markdown . (,@(when (md-ts--hide-markup-enabled-p)
                     '((fenced_code_block) @node))
                  (link_reference_definition) @node))
     (markdown-inline . ((inline_link) @node
@@ -3270,7 +3289,8 @@ or end line is touched by FONTIFY-BEG..FONTIFY-END."
       (get-text-property pos 'md-ts-link-static-target)
       (get-text-property pos 'md-ts-bare-link-face)
       (get-text-property pos 'md-ts-display)
-      (eq (get-text-property pos 'invisible) 'md-ts--markup)
+      (md-ts--invisible-value-includes-p
+       (get-text-property pos 'invisible) 'md-ts--markup)
       (get-text-property pos 'font-lock-multiline)))
 
 (defun md-ts--font-lock-side-effect-property-span (pos)
@@ -3280,7 +3300,8 @@ or end line is touched by FONTIFY-BEG..FONTIFY-END."
     (dolist (prop md-ts--font-lock-side-effect-properties)
       (when (cond
              ((eq prop 'invisible)
-              (eq (get-text-property pos prop) 'md-ts--markup))
+              (md-ts--invisible-value-includes-p
+               (get-text-property pos prop) 'md-ts--markup))
              (t
               (get-text-property pos prop)))
         (setq beg (min beg (or (previous-single-property-change
