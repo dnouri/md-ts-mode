@@ -29,9 +29,9 @@ Emacs 29, 30, and 31.
   visible link text remains activatable.
 - Imenu and ~outline-minor-mode~ integration via headings.
 - Custom faces: ~md-ts-heading-1~ through ~md-ts-heading-6~,
-  ~md-ts-setext-heading~, ~md-ts-delimiter~, ~md-ts-list-marker~,
-  ~md-ts-block-quote~, ~md-ts-strikethrough~,
-  ~md-ts-language-keyword~, and ~md-ts-task-list-marker~.
+  ~md-ts-delimiter~, ~md-ts-list-marker~, ~md-ts-block-quote~,
+  ~md-ts-strikethrough~, ~md-ts-language-keyword~,
+  ~md-ts-task-list-marker~, and ~md-ts-code~.
 
 
 ** Opening links

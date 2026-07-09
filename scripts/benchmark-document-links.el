@@ -43,6 +43,7 @@
 (md-ts-bench--add-existing-tree-sitter-paths)
 (add-to-list 'load-path md-ts-bench--repo-root)
 (load (expand-file-name "md-ts-mode.el" md-ts-bench--repo-root) nil 'nomessage)
+(declare-function md-ts-mode "md-ts-mode")
 
 (defvar md-ts-bench-iterations
   (let ((value (getenv "PERF_ITERATIONS")))

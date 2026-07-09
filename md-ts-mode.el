@@ -2175,6 +2175,20 @@ left intact."
       (and (>= index 0)
            (< beg (cdr (aref ranges index)))))))
 
+(defun md-ts--range-contained-in-sorted-ranges-p (beg end ranges)
+  "Return non-nil when BEG..END is contained in sorted RANGES."
+  (let ((lo 0)
+        (hi (length ranges)))
+    (while (< lo hi)
+      (let* ((mid (+ lo (/ (- hi lo) 2)))
+             (range (aref ranges mid)))
+        (if (<= (car range) beg)
+            (setq lo (1+ mid))
+          (setq hi mid))))
+    (let ((index (1- lo)))
+      (and (>= index 0)
+           (<= end (cdr (aref ranges index)))))))
+
 (defun md-ts--range-in-reference-definition-ranges-p (beg end ranges)
   "Return non-nil when BEG to END is inside one of RANGES."
   (seq-some (lambda (range)
@@ -2465,25 +2479,42 @@ URL-RANGES are cached generic URL ranges used to detect outer bare URLs."
   (or (md-ts--bare-mailto-uri-embedded-in-scheme-token-p beg)
       (md-ts--bare-link-covered-by-earlier-url-p beg end url-ranges)))
 
-(defun md-ts--bare-email-in-scheme-mailto-uri-p (beg end)
-  "Return non-nil if email BEG..END is inside scheme-prefixed `mailto:' text."
-  (save-excursion
-    (let ((case-fold-search t)
-          mailto-beg found)
-      (goto-char beg)
-      (while (search-backward "mailto:" (line-beginning-position) t)
-        (unless found
-          (setq mailto-beg (point))
-          (when (and (eq (char-before mailto-beg) ?:)
-                     (md-ts--bare-mailto-uri-embedded-in-scheme-token-p
-                      mailto-beg)
-                     (looking-at md-ts--bare-mailto-uri-regexp)
-                     (pcase-let ((`(,_match-beg ,match-end ,_text)
-                                  (md-ts--bare-mailto-uri-normalized-match
-                                   (match-beginning 0) (match-end 0))))
-                       (<= end match-end)))
-            (setq found t))))
-      found)))
+(defun md-ts--bare-scheme-mailto-uri-ranges (scan-beg scan-end)
+  "Return scheme-prefixed `mailto:' ranges between SCAN-BEG and SCAN-END.
+These ranges suppress bare-email fallback inside constructs such as
+`foo:mailto:me@example.com' without hiding emails in `x-mailto:' text."
+  (let (ranges)
+    (save-excursion
+      (save-match-data
+        (let ((case-fold-search t))
+          (goto-char scan-beg)
+          (while (re-search-forward md-ts--bare-mailto-uri-regexp scan-end t)
+            (pcase-let ((`(,mailto-beg ,mailto-end ,_text)
+                         (md-ts--bare-mailto-uri-normalized-match
+                          (match-beginning 0) (match-end 0))))
+              (when (and (eq (char-before mailto-beg) ?:)
+                         (md-ts--bare-mailto-uri-embedded-in-scheme-token-p
+                          mailto-beg))
+                (push (cons mailto-beg mailto-end) ranges)))))))
+    (md-ts--bare-link-sort-merge-ranges ranges)))
+
+(defun md-ts--bare-scheme-mailto-uri-range-cache (scan-beg scan-end)
+  "Return a function caching scheme-prefixed `mailto:' ranges.
+SCAN-BEG and SCAN-END bound the cached scan."
+  (let (ranges)
+    (lambda ()
+      (or ranges
+          (setq ranges
+                (md-ts--bare-scheme-mailto-uri-ranges scan-beg scan-end))))))
+
+(defun md-ts--bare-email-in-scheme-mailto-uri-p (beg end &optional ranges)
+  "Return non-nil if email BEG..END is inside scheme-prefixed `mailto:' text.
+RANGES, when non-nil, is a sorted vector from
+`md-ts--bare-scheme-mailto-uri-ranges'."
+  (unless ranges
+    (pcase-let ((`(,line-beg . ,line-end) (md-ts--line-bounds beg end)))
+      (setq ranges (md-ts--bare-scheme-mailto-uri-ranges line-beg line-end))))
+  (md-ts--range-contained-in-sorted-ranges-p beg end ranges))
 
 (defun md-ts--fontify-bare-links (beg end)
   "Fontify bare URLs, email addresses, and practical `mailto:' forms.
@@ -2502,7 +2533,10 @@ Operate on lines covering BEG to END."
                        scan-beg scan-end))
                      (generic-url-ranges-cache
                       (md-ts--bare-link-generic-url-range-cache
-                       scan-beg scan-end t)))
+                       scan-beg scan-end t))
+                     (scheme-mailto-ranges-cache
+                      (md-ts--bare-scheme-mailto-uri-range-cache
+                       scan-beg scan-end)))
                 ;; Scan explicit mailto before generic URLs so a standalone
                 ;; mailto owns URL-like query text.  Skip it when a cached
                 ;; earlier generic URL covers it, so outer URLs own embedded
@@ -2522,7 +2556,8 @@ Operate on lines covering BEG to END."
                  (lambda (address) (concat "mailto:" address))
                  (lambda (match-beg match-end _text)
                    (md-ts--bare-email-in-scheme-mailto-uri-p
-                    match-beg match-end)))))))))))
+                    match-beg match-end
+                    (funcall scheme-mailto-ranges-cache))))))))))))
 
 (defvar-local md-ts--font-lock-stale-side-effect-bounds nil
   "Old side-effect node bounds recorded before destructive edits.
@@ -2904,7 +2939,10 @@ has the same meaning as in `md-ts--bare-link-candidate-valid-p'."
                    line-beg line-end))
                  (generic-url-ranges-cache
                   (md-ts--bare-link-generic-url-range-cache
-                   line-beg line-end check-overlap)))
+                   line-beg line-end check-overlap))
+                 (scheme-mailto-ranges-cache
+                  (md-ts--bare-scheme-mailto-uri-range-cache
+                   line-beg line-end)))
             ;; Match fontification precedence: standalone mailto owns query
             ;; text, but an outer URL wins over embedded mailto/email-looking
             ;; text in its path or query.
@@ -2922,7 +2960,8 @@ has the same meaning as in `md-ts--bare-link-candidate-valid-p'."
                  (lambda (address) (concat "mailto:" address))
                  (lambda (match-beg match-end _text)
                    (md-ts--bare-email-in-scheme-mailto-uri-p
-                    match-beg match-end))
+                    match-beg match-end
+                    (funcall scheme-mailto-ranges-cache)))
                  nil check-overlap))))))))
 
 (defun md-ts--open-link-button (button)

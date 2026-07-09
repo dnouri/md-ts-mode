@@ -171,6 +171,22 @@ NTH selects occurrence (default 1)."
           (md-ts-open-link-at-point))
       (kill-buffer buf))))
 
+(defun md-ts-test--open-link-no-fontify-should-reject (text search
+                                                            &optional nth)
+  "Assert `md-ts-open-link-at-point' rejects SEARCH in unfontified TEXT.
+NTH selects occurrence (default 1).  Link openers fail the test if called."
+  (cl-letf (((symbol-function 'browse-url)
+             (lambda (&rest _args)
+               (ert-fail "browse-url called for unsafe bare link")))
+            ((symbol-function 'find-file)
+             (lambda (&rest _args)
+               (ert-fail "find-file called for unsafe bare link")))
+            ((symbol-function 'url-mailto)
+             (lambda (&rest _args)
+               (ert-fail "url-mailto called for unsafe bare link"))))
+    (should-error (md-ts-test--open-link-at-search-no-fontify text search nth)
+                  :type 'user-error)))
+
 (defconst md-ts-test--repo-root
   (file-name-directory
    (directory-file-name
@@ -1128,7 +1144,7 @@ inline parser ranges cause the first range's faces to be dropped."
       (kill-buffer buf))))
 
 (ert-deftest md-ts-test-link-dynamic-legacy-button-cleaned-on-mode-setup ()
-  "c102465 dynamic md-ts buttons are removed when mode is enabled."
+  "Legacy dynamic md-ts buttons are removed when mode is enabled."
   (let ((buf (generate-new-buffer " *md-ts-test*")))
     (unwind-protect
         (with-current-buffer buf
@@ -3010,6 +3026,47 @@ inline parser ranges cause the first range's faces to be dropped."
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
 
+(ert-deftest md-ts-test-link-bare-email-scheme-mailto-long-line-cache ()
+  "Many emails should share one scheme-prefixed mailto range cache."
+  (let* ((count 64)
+         (text (concat (mapconcat
+                        (lambda (n)
+                          (format (concat "foo:mailto:hidden%d@example.com?subject=Hi "
+                                          "visible%d@example.net")
+                                  n n))
+                        (number-sequence 1 count)
+                        " ")
+                       "\n"))
+         (scheme-range-builds 0)
+         (scheme-ranges-original
+          (symbol-function 'md-ts--bare-scheme-mailto-uri-ranges))
+         buf)
+    (unwind-protect
+        (progn
+          (setq buf (generate-new-buffer " *md-ts-test*"))
+          (with-current-buffer buf
+            (insert text)
+            (md-ts-mode)
+            (cl-letf (((symbol-function 'md-ts--bare-scheme-mailto-uri-ranges)
+                       (lambda (&rest args)
+                         (setq scheme-range-builds (1+ scheme-range-builds))
+                         (apply scheme-ranges-original args)))
+                      ((symbol-function 'search-backward)
+                       (lambda (&rest args)
+                         (ert-fail
+                          (format "unexpected mailto backscan: %S" args)))))
+              (md-ts--fontify-bare-links (point-min) (point-max)))
+            (should (= scheme-range-builds 1))
+            (dotimes (n count)
+              (goto-char (point-min))
+              (search-forward (format "hidden%d@example.com" (1+ n)))
+              (should-not (button-at (match-beginning 0)))
+              (goto-char (point-min))
+              (search-forward (format "visible%d@example.net" (1+ n)))
+              (should (button-at (match-beginning 0))))))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
 (ert-deftest md-ts-test-link-bare-fontification-caches-unsafe-contexts ()
   "Bare link scans should not do point-node unsafe checks per candidate."
   (let* ((count 48)
@@ -4537,6 +4594,93 @@ inline parser ranges cause the first range's faces to be dropped."
        "See [Doc][id].\n\n[id]: https://example.com/ref\n"
        "Doc"))
     (should (equal opened "https://example.com/ref"))))
+
+(ert-deftest md-ts-test-link-open-at-point-no-fontify-rejects-unsafe-bare ()
+  "`md-ts-open-link-at-point' should reject unsafe bare-looking text."
+  (dolist (case
+           '(("code span URL"
+              "Code `https://unsafe.example/span` here.\n"
+              "https://unsafe.example/span")
+             ("code span email"
+              "Code `person@example.com` here.\n"
+              "person@example.com")
+             ("fenced code URL"
+              "```\nhttps://unsafe.example/fenced\n```\n"
+              "https://unsafe.example/fenced")
+             ("fenced code email"
+              "```\nperson@example.com\n```\n"
+              "person@example.com")
+             ("indented code URL"
+              "    https://unsafe.example/indented\n"
+              "https://unsafe.example/indented")
+             ("indented code email"
+              "    person@example.com\n"
+              "person@example.com")
+             ("HTML attribute URL"
+              "<a href=\"https://unsafe.example/attr\">label</a>\n"
+              "https://unsafe.example/attr")
+             ("HTML attribute email"
+              "<a data-email=\"person@example.com\">label</a>\n"
+              "person@example.com")
+             ("HTML block URL"
+              "<div>\nhttps://unsafe.example/block\n</div>\n"
+              "https://unsafe.example/block")
+             ("HTML block email"
+              "<div>\nperson@example.com\n</div>\n"
+              "person@example.com")
+             ("YAML front matter URL"
+              "---\nurl: https://unsafe.example/meta\n---\n\n"
+              "https://unsafe.example/meta")
+             ("YAML front matter email"
+              "---\nemail: person@example.com\n---\n\n"
+              "person@example.com")
+             ("TOML front matter URL"
+              "+++\nurl = \"https://unsafe.example/meta\"\n+++\n\n"
+              "https://unsafe.example/meta")
+             ("TOML front matter email"
+              "+++\nemail = \"person@example.com\"\n+++\n\n"
+              "person@example.com")))
+    (ert-info ((format "checking %s" (nth 0 case)))
+      (md-ts-test--open-link-no-fontify-should-reject
+       (nth 1 case) (nth 2 case)))))
+
+(ert-deftest md-ts-test-link-open-at-point-bare-fallback-rejects-destinations ()
+  "Bare fallback should reject URL/email text in parsed destinations."
+  (dolist (case
+           '(("inline link destination URL"
+              "Visit [label](https://unsafe.example/inline).\n"
+              "https://unsafe.example/inline")
+             ("inline link destination email"
+              "Visit [label](person@example.com).\n"
+              "person@example.com")
+             ("reference definition destination URL"
+              "[id]: https://unsafe.example/ref\n\nSee [id].\n"
+              "https://unsafe.example/ref")
+             ("reference definition destination email"
+              "[id]: person@example.com\n\nSee [id].\n"
+              "person@example.com")))
+    (ert-info ((format "checking %s" (nth 0 case)))
+      (let ((buf (generate-new-buffer " *md-ts-test*")))
+        (unwind-protect
+            (with-current-buffer buf
+              (insert (nth 1 case))
+              (md-ts-mode)
+              (goto-char (point-min))
+              (search-forward (nth 2 case))
+              (goto-char (match-beginning 0))
+              (cl-letf (((symbol-function 'md-ts--link-target-at-point)
+                         (lambda (&optional _pos) nil))
+                        ((symbol-function 'browse-url)
+                         (lambda (&rest _args)
+                           (ert-fail "browse-url called for parsed destination")))
+                        ((symbol-function 'find-file)
+                         (lambda (&rest _args)
+                           (ert-fail "find-file called for parsed destination")))
+                        ((symbol-function 'url-mailto)
+                         (lambda (&rest _args)
+                           (ert-fail "url-mailto called for parsed destination"))))
+                (should-error (md-ts-open-link-at-point) :type 'user-error)))
+          (kill-buffer buf))))))
 
 (ert-deftest md-ts-test-link-open-at-point-no-fontify-foreign-text-button ()
   "Foreign text buttons should not block no-fontify parser fallback."
