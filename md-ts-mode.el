@@ -1019,16 +1019,47 @@ Markdown syntax."
         (apply #'concat (nreverse (cons (substring text start) pieces)))
       text)))
 
+(defconst md-ts--character-reference-name-alist
+  '(("amp" . "&")
+    ("lt" . "<")
+    ("gt" . ">")
+    ("quot" . "\"")
+    ("apos" . "'"))
+  "Minimal named character references decoded in link destinations.")
+
+(defun md-ts--decode-character-references (text)
+  "Decode minimal CommonMark character references in TEXT.
+This is intentionally scoped to link destinations/autolinks and
+supports numeric references plus the core XML/HTML named references."
+  (replace-regexp-in-string
+   "&\\(#x[[:xdigit:]]+\\|#[0-9]+\\|[[:alpha:]][[:alnum:]]*\\);"
+   (lambda (reference)
+     (let ((body (substring reference 1 -1)))
+       (cond
+        ((string-prefix-p "#x" body)
+         (condition-case nil
+             (char-to-string (string-to-number (substring body 2) 16))
+           (error reference)))
+        ((string-prefix-p "#" body)
+         (condition-case nil
+             (char-to-string (string-to-number (substring body 1) 10))
+           (error reference)))
+        (t (or (alist-get body md-ts--character-reference-name-alist
+                          nil nil #'string=)
+               reference)))))
+   text t t))
+
 (defun md-ts--link-destination-url (destination)
   "Return the URL represented by raw link DESTINATION text.
 Unwrap angle-bracket destinations and decode basic Markdown
-backslash escapes."
+backslash escapes plus character references."
   (let ((url (if (and (> (length destination) 1)
                       (string-prefix-p "<" destination)
                       (string-suffix-p ">" destination))
                  (substring destination 1 -1)
                destination)))
-    (md-ts--markdown-unescape url)))
+    (md-ts--decode-character-references
+     (md-ts--markdown-unescape url))))
 
 (defvar-local md-ts--link-reference-definitions-cache nil
   "Cached hash table of Markdown link reference definitions.
@@ -1232,8 +1263,9 @@ enclosing link label."
 
 (defun md-ts--autolink-inner-text (node)
   "Return the target text inside autolink NODE's angle brackets."
-  (buffer-substring-no-properties (1+ (treesit-node-start node))
-                                  (1- (treesit-node-end node))))
+  (md-ts--decode-character-references
+   (buffer-substring-no-properties (1+ (treesit-node-start node))
+                                   (1- (treesit-node-end node)))))
 
 (defun md-ts--link-target-for-node (node)
   "Return the opener-ready target URL for parsed link NODE.
@@ -2411,14 +2443,14 @@ cleanup there unless they intentionally want to mutate shared text."
   (with-silent-modifications
     (let ((inhibit-read-only t))
       ;; Indirect buffers share text properties with their base buffer.  Avoid
-      ;; destructive md-ts side-effect cleanup there; paired refontification can
-      ;; still refresh stale shared props through `md-ts--font-lock-fontify-region'.
+      ;; destructive unfontification there; paired refontification in the base
+      ;; buffer owns shared md-ts text properties.
       (unless (buffer-base-buffer)
         (md-ts--remove-invisible-properties beg end)
         (md-ts--remove-display-properties beg end)
         (md-ts--remove-bare-link-button-properties beg end)
-        (md-ts--remove-link-button-properties beg end))
-      (font-lock-default-unfontify-region beg end))))
+        (md-ts--remove-link-button-properties beg end)
+        (font-lock-default-unfontify-region beg end)))))
 
 (defun md-ts--treesit-query-specs-for-node-types (specs capture)
   "Return tree-sitter query SPECS that capture node types as CAPTURE."
@@ -3166,6 +3198,9 @@ Indirect buffers share text properties, so this list is stored and
 consumed on the base buffer when one exists.  Each element is a
 cons of markers in shared buffer coordinates.")
 
+(defvar-local md-ts--font-lock-last-fontified-tick nil
+  "Buffer modified tick from the last md-ts fontification pass.")
+
 (defun md-ts--font-lock-state-buffer ()
   "Return the buffer that owns shared font-lock side-effect state."
   (or (buffer-base-buffer) (current-buffer)))
@@ -3186,6 +3221,16 @@ cons of markers in shared buffer coordinates.")
     (push (cons (copy-marker beg)
                 (copy-marker end t))
           md-ts--font-lock-stale-side-effect-bounds)))
+
+(defun md-ts--font-lock-last-fontified-tick ()
+  "Return the shared last-fontified modified tick."
+  (with-current-buffer (md-ts--font-lock-state-buffer)
+    md-ts--font-lock-last-fontified-tick))
+
+(defun md-ts--font-lock-set-last-fontified-tick (tick)
+  "Set the shared last-fontified modified TICK."
+  (with-current-buffer (md-ts--font-lock-state-buffer)
+    (setq md-ts--font-lock-last-fontified-tick tick)))
 
 (defconst md-ts--font-lock-side-effect-properties
   '(md-ts-link-button md-ts-link-help-echo md-ts-link-static-target
@@ -3494,17 +3539,20 @@ LOUDLY is passed to `treesit-font-lock-fontify-region'.  Return
 jit-lock bounds for the expanded physical lines fontified and bare-scanned."
   (pcase-let ((`(,fontify-beg . ,fontify-end)
                (md-ts--font-lock-expand-bounds-for-side-effects beg end)))
-    (save-restriction
-      (widen)
-      (md-ts--remove-display-properties fontify-beg fontify-end)
-      (when (buffer-base-buffer)
-        (md-ts--remove-invisible-properties fontify-beg fontify-end)
-        (md-ts--remove-parsed-link-button-properties fontify-beg fontify-end))
-      (md-ts--font-lock-prune-invalid-local-parsers fontify-beg fontify-end)
-      (md-ts--with-base-buffer-widened
-        (treesit-font-lock-fontify-region fontify-beg fontify-end loudly)))
-    (md-ts--fontify-bare-links fontify-beg fontify-end)
-    `(jit-lock-bounds ,fontify-beg . ,fontify-end)))
+    (let* ((tick (buffer-chars-modified-tick))
+           (stale (not (eql tick (md-ts--font-lock-last-fontified-tick)))))
+      (save-restriction
+        (widen)
+        (md-ts--remove-display-properties fontify-beg fontify-end)
+        (when (and (buffer-base-buffer) stale)
+          (md-ts--remove-invisible-properties fontify-beg fontify-end)
+          (md-ts--remove-parsed-link-button-properties fontify-beg fontify-end))
+        (md-ts--font-lock-prune-invalid-local-parsers fontify-beg fontify-end)
+        (md-ts--with-base-buffer-widened
+          (treesit-font-lock-fontify-region fontify-beg fontify-end loudly)))
+      (md-ts--fontify-bare-links fontify-beg fontify-end)
+      (md-ts--font-lock-set-last-fontified-tick tick)
+      `(jit-lock-bounds ,fontify-beg . ,fontify-end))))
 
 (defun md-ts--link-target-at-point (&optional pos)
   "Return the parsed Markdown link target at POS, or nil.

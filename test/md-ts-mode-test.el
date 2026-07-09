@@ -950,8 +950,17 @@ inline parser ranges cause the first range's faces to be dropped."
   (should (equal (md-ts--link-destination-url
                   "<https://example.com/a\\*b>")
                  "https://example.com/a*b"))
+  (should (equal (md-ts--link-destination-url
+                  "https://e.test?a=1&amp;b=2&#x21;")
+                 "https://e.test?a=1&b=2!"))
   (should (equal (md-ts--link-destination-url "C:\\path")
                  "C:\\path")))
+
+(ert-deftest md-ts-test-link-inline-character-reference-destination ()
+  "Inline link destinations decode Markdown character references."
+  (let ((text "Visit [here](https://e.test?a=1&amp;b=2) now.\n")
+        (url "https://e.test?a=1&b=2"))
+    (should (equal (md-ts-test--help-echo-at-search text "here") url))))
 
 (ert-deftest md-ts-test-link-inline-button ()
   "Inline link text should activate the exact destination."
@@ -994,6 +1003,14 @@ inline parser ranges cause the first range's faces to be dropped."
                  (setq opened dest))))
       (md-ts-test--push-button-at-search text "here"))
     (should (equal opened url))))
+
+(ert-deftest md-ts-test-link-autolink-character-reference-destination ()
+  "URI autolinks decode Markdown character references in their target."
+  (let ((text "Visit <https://e.test?a=1&amp;b=2> now.\n")
+        (url "https://e.test?a=1&b=2"))
+    (should (equal (md-ts-test--help-echo-at-search text
+                                                    "https://e.test")
+                   url))))
 
 (ert-deftest md-ts-test-link-inline-help-echo-strips-escaped-properties ()
   "Help strings should not retain Markdown escape provenance properties."
@@ -5545,6 +5562,28 @@ inline parser ranges cause the first range's faces to be dropped."
        "Doc"))
     (should (equal opened "https://example.com/ref"))))
 
+(ert-deftest md-ts-test-link-image-character-reference-destination ()
+  "Image destinations decode Markdown character references."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--open-link-at-search
+       "See ![Alt](https://e.test/img?x=1&amp;y=2).\n"
+       "Alt"))
+    (should (equal opened "https://e.test/img?x=1&y=2"))))
+
+(ert-deftest md-ts-test-link-reference-character-reference-destination ()
+  "Reference definitions decode Markdown character references."
+  (let (opened)
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url))))
+      (md-ts-test--open-link-at-search
+       "See [Doc][id].\n\n[id]: https://e.test/ref?x=1&amp;y=2\n"
+       "Doc"))
+    (should (equal opened "https://e.test/ref?x=1&y=2"))))
+
 (ert-deftest md-ts-test-link-open-at-point-no-fontify-inline ()
   "`md-ts-open-link-at-point' should work before explicit fontification."
   (let (opened)
@@ -6650,6 +6689,7 @@ inline.  For `# Hello\\n' (buffer positions 1-9):
   atx_h1_marker: 1-2
   inline:        3-8
 Expected gaps: (1 . 1) (2 . 3) (8 . 9)."
+  (skip-unless md-ts--range-shims-installed)
   (let ((buf (generate-new-buffer " *md-ts-test-exclude*")))
     (unwind-protect
         (with-current-buffer buf
@@ -6671,6 +6711,7 @@ With offset (1 . -1) on the same atx_heading (1-9):
   start = 1+1 = 2, end = 9+(-1) = 8
   child gaps computed from offset-adjusted start/end.
 Expected: (2 . 1) (2 . 3) (8 . 8)."
+  (skip-unless md-ts--range-shims-installed)
   (let ((buf (generate-new-buffer " *md-ts-test-exclude-off*")))
     (unwind-protect
         (with-current-buffer buf
@@ -6737,6 +6778,7 @@ ranges match the original: ((3 . 8) (10 . 26))."
 Pass `treesit-range-fn-exclude-children' as RANGE-FN for an
 atx_heading query.  The heading has children, so the returned
 ranges should be the gaps between children, not a single range."
+  (skip-unless md-ts--range-shims-installed)
   (let ((buf (generate-new-buffer " *md-ts-test-qr-fn*")))
     (unwind-protect
         (with-current-buffer buf
@@ -6755,6 +6797,7 @@ ranges should be the gaps between children, not a single range."
 
 (ert-deftest md-ts-test-query-range-range-fn-with-offset ()
   "Shimmed treesit-query-range passes OFFSET to RANGE-FN."
+  (skip-unless md-ts--range-shims-installed)
   (let ((buf (generate-new-buffer " *md-ts-test-qr-fn-off*")))
     (unwind-protect
         (with-current-buffer buf
@@ -6825,6 +6868,7 @@ The code_fence_content node has parser-injected children, so
 exclude-children returns multiple gap ranges rather than a single
 range.  Verify that RANGE-FN is called by checking the number of
 ranges differs from 1 (which is what you'd get without RANGE-FN)."
+  (skip-unless md-ts--range-shims-installed)
   (let ((buf (generate-new-buffer " *md-ts-test-qrbl-fn*")))
     (unwind-protect
         (with-current-buffer buf
@@ -6978,7 +7022,7 @@ verify that a local python parser overlay is created."
                          '((fenced_code_block
                             (code_fence_content) @content))))
                  (tick (buffer-chars-modified-tick)))
-            (treesit--update-ranges-local query 'python tick)
+            (funcall (symbol-function 'treesit--update-ranges-local) query 'python tick)
             ;; Should have created an overlay with a python parser
             (let ((found nil))
               (dolist (ov (overlays-in (point-min) (point-max)))
@@ -7006,7 +7050,7 @@ Use a language resolver function that returns \\='python for the
                  (tick (buffer-chars-modified-tick))
                  (lang-fn (lambda (node)
                             (intern (treesit-node-text node)))))
-            (treesit--update-ranges-local query lang-fn tick)
+            (funcall (symbol-function 'treesit--update-ranges-local) query lang-fn tick)
             ;; Should have created an overlay with a python parser
             (let ((found nil))
               (dolist (ov (overlays-in (point-min) (point-max)))
@@ -7029,7 +7073,7 @@ Use a language resolver function that returns \\='python for the
                          '((fenced_code_block
                             (code_fence_content) @content))))
                  (tick (buffer-chars-modified-tick)))
-            (treesit--update-ranges-local query 'python tick)
+            (funcall (symbol-function 'treesit--update-ranges-local) query 'python tick)
             (let ((count 0))
               (dolist (ov (overlays-in (point-min) (point-max)))
                 (when (overlay-get ov 'treesit-parser)
@@ -7052,9 +7096,9 @@ into multiple gap ranges, creating more overlays than without."
                          '((fenced_code_block
                             (code_fence_content) @content))))
                  (tick (buffer-chars-modified-tick)))
-            (treesit--update-ranges-local
-             query 'python tick nil nil nil
-             #'treesit-range-fn-exclude-children)
+            (funcall (symbol-function 'treesit--update-ranges-local)
+                     query 'python tick nil nil nil
+                     #'treesit-range-fn-exclude-children)
             (let ((count 0))
               (dolist (ov (overlays-in (point-min) (point-max)))
                 (when (overlay-get ov 'treesit-parser)
@@ -7442,8 +7486,13 @@ Consecutive nil-face spans are collapsed into one."
   (expand-file-name "fixture.md" (md-ts-test--test-dir)))
 
 (defun md-ts-test--snapshot-path ()
-  "Return absolute path to test/fixture-faces.eld."
-  (expand-file-name "fixture-faces.eld" (md-ts-test--test-dir)))
+  "Return absolute path to the face snapshot for this Emacs version."
+  (let ((versioned (expand-file-name "fixture-faces-emacs31.eld"
+                                     (md-ts-test--test-dir))))
+    (if (and (>= emacs-major-version 31)
+             (file-exists-p versioned))
+        versioned
+      (expand-file-name "fixture-faces.eld" (md-ts-test--test-dir)))))
 
 (defun md-ts-test--visible-path ()
   "Return absolute path to test/fixture-visible.txt."

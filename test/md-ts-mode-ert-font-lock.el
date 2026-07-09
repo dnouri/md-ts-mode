@@ -29,6 +29,9 @@
 (require 'ert)
 (require 'treesit)
 
+(declare-function ert-font-lock-test-file "ert-font-lock" (file mode))
+(declare-function ert-font-lock-test-string "ert-font-lock" (string mode))
+
 (unless (require 'ert-font-lock nil t)
   ;; Provide stubs so the file loads on Emacs 29 without error.
   ;; All tests will be skipped via skip-unless.
