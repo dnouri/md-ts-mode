@@ -187,6 +187,30 @@ NTH selects occurrence (default 1).  Link openers fail the test if called."
     (should-error (md-ts-test--open-link-at-search-no-fontify text search nth)
                   :type 'user-error)))
 
+(defconst md-ts-test--foreign-direct-interactive-props
+  '(help-echo action keymap local-map mouse-face follow-link)
+  "Foreign direct text properties that should block md-ts link UI.")
+
+(defun md-ts-test--foreign-direct-interactive-prop-value (prop)
+  "Return a distinctive test value for foreign direct text property PROP."
+  (pcase prop
+    ('help-echo "foreign help")
+    ('action (lambda (_button) :foreign))
+    ((or 'keymap 'local-map)
+     (let ((map (make-sparse-keymap)))
+       (define-key map [mouse-1] #'ignore)
+       map))
+    ('mouse-face 'highlight)
+    ('follow-link t)
+    (_ (error "Unhandled foreign direct prop: %S" prop))))
+
+(defun md-ts-test--should-have-direct-property (pos prop value)
+  "Assert POS has direct text property PROP set to VALUE."
+  (let ((actual (plist-get (text-properties-at pos) prop)))
+    (if (stringp value)
+        (should (equal actual value))
+      (should (eq actual value)))))
+
 (defconst md-ts-test--repo-root
   (file-name-directory
    (directory-file-name
@@ -1121,63 +1145,70 @@ inline parser ranges cause the first range's faces to be dropped."
       (kill-buffer buf))))
 
 (ert-deftest md-ts-test-link-cleanup-preserves-foreign-direct-interactive-props ()
-  "Stale md-ts button cleanup should keep foreign direct UI props."
-  (let ((buf (md-ts-test--fontify "[link](https://example.com)\n"))
-        (keymap (make-sparse-keymap)))
-    (unwind-protect
-        (with-current-buffer buf
-          (define-key keymap [mouse-1] #'ignore)
-          (goto-char (point-min))
-          (search-forward "link")
-          (let ((pos (match-beginning 0))
-                (end (match-end 0)))
-            (should (md-ts--link-button-p (button-at pos)))
-            (put-text-property pos end 'help-echo "foreign help")
-            (put-text-property pos end 'keymap keymap)
-            (put-text-property pos end 'mouse-face 'highlight)
-            (put-text-property pos end 'follow-link t)
-            (md-ts--remove-link-button-properties pos end)
-            (should-not (button-at pos))
-            (should-not (get-text-property pos 'md-ts-link-button))
-            (should-not (get-text-property pos 'md-ts-link-help-echo))
-            (should (equal (get-text-property pos 'help-echo)
-                           "foreign help"))
-            (should (eq (get-text-property pos 'keymap) keymap))
-            (should (eq (get-text-property pos 'mouse-face) 'highlight))
-            (should (get-text-property pos 'follow-link))))
-      (kill-buffer buf))))
-
-(ert-deftest md-ts-test-link-foreign-direct-interactive-props-prevent-fontification ()
-  "Direct non-button UI props should keep md-ts from overwriting them."
+  "Stale md-ts cleanup should keep each foreign direct UI prop."
   (dolist (case '((parsed "[link](https://example.com)\n" "link")
                   (bare "Visit https://example.com now.\n"
                         "https://example.com")))
     (pcase-let ((`(,label ,text ,search) case))
-      (ert-info ((format "%s link" label))
-        (let ((buf (generate-new-buffer " *md-ts-test*"))
-              (keymap (make-sparse-keymap))
-              (action (lambda (_button) :foreign)))
-          (unwind-protect
-              (with-current-buffer buf
-                (insert text)
-                (goto-char (point-min))
-                (search-forward search)
-                (let ((pos (match-beginning 0))
-                      (end (match-end 0)))
-                  (define-key keymap [mouse-1] #'ignore)
-                  (put-text-property pos end 'help-echo "foreign help")
-                  (put-text-property pos end 'keymap keymap)
-                  (put-text-property pos end 'action action)
-                  (md-ts-mode)
-                  (font-lock-ensure)
-                  (should-not (button-at pos))
-                  (should-not (get-text-property pos 'md-ts-link-button))
-                  (should-not (get-text-property pos 'md-ts-link-help-echo))
-                  (should (equal (get-text-property pos 'help-echo)
-                                 "foreign help"))
-                  (should (eq (get-text-property pos 'keymap) keymap))
-                  (should (eq (get-text-property pos 'action) action))))
-            (kill-buffer buf)))))))
+      (dolist (prop md-ts-test--foreign-direct-interactive-props)
+        (ert-info ((format "%s direct %S" label prop))
+          (let ((buf (md-ts-test--fontify text))
+                (value (md-ts-test--foreign-direct-interactive-prop-value prop)))
+            (unwind-protect
+                (with-current-buffer buf
+                  (goto-char (point-min))
+                  (search-forward search)
+                  (let ((pos (match-beginning 0))
+                        (end (match-end 0)))
+                    (should (md-ts--link-button-p (button-at pos)))
+                    (put-text-property pos end prop value)
+                    (md-ts--remove-link-button-properties pos end)
+                    (md-ts-test--should-have-direct-property pos prop value)
+                    (should-not (get-text-property pos 'md-ts-link-button))
+                    (should-not (get-text-property pos 'md-ts-link-help-echo))
+                    (should-not (get-text-property pos
+                                                   'md-ts-link-static-target))
+                    (when (eq prop 'help-echo)
+                      (should (equal (get-text-property pos 'help-echo)
+                                     "foreign help")))
+                    (if (eq prop 'action)
+                        (progn
+                          (should (button-at pos))
+                          (should-not (md-ts--link-button-p (button-at pos))))
+                      (should-not (button-at pos)))))
+              (kill-buffer buf))))))))
+
+(ert-deftest md-ts-test-link-foreign-direct-interactive-props-prevent-fontification ()
+  "Each direct non-button UI prop should block md-ts buttonization."
+  (dolist (case '((parsed "[link](https://example.com)\n" "link")
+                  (bare "Visit https://example.com now.\n"
+                        "https://example.com")))
+    (pcase-let ((`(,label ,text ,search) case))
+      (dolist (prop md-ts-test--foreign-direct-interactive-props)
+        (ert-info ((format "%s link direct %S" label prop))
+          (let ((buf (generate-new-buffer " *md-ts-test*"))
+                (value (md-ts-test--foreign-direct-interactive-prop-value prop)))
+            (unwind-protect
+                (with-current-buffer buf
+                  (insert text)
+                  (goto-char (point-min))
+                  (search-forward search)
+                  (let ((pos (match-beginning 0))
+                        (end (match-end 0)))
+                    (put-text-property pos end prop value)
+                    (md-ts-mode)
+                    (font-lock-ensure)
+                    (should-not (button-at pos))
+                    (should-not (get-text-property pos 'md-ts-link-button))
+                    (should-not (get-text-property pos 'md-ts-link-help-echo))
+                    (should-not (get-text-property pos
+                                                   'md-ts-link-static-target))
+                    (md-ts-test--should-have-direct-property pos prop value)
+                    (unless (eq prop 'help-echo)
+                      (should-not (get-text-property pos 'help-echo)))
+                    (unless (eq prop 'action)
+                      (should-not (get-text-property pos 'action)))))
+              (kill-buffer buf))))))))
 
 (ert-deftest md-ts-test-link-multiline-button-cleanup-expands-span ()
   "Partial unfontification should clean a whole md-ts multiline button."
@@ -3143,6 +3174,7 @@ inline parser ranges cause the first range's faces to be dropped."
          (scheme-range-builds 0)
          (scheme-ranges-original
           (symbol-function 'md-ts--bare-scheme-mailto-uri-ranges))
+         (search-backward-original (symbol-function 'search-backward))
          buf)
     (unwind-protect
         (progn
@@ -3155,9 +3187,13 @@ inline parser ranges cause the first range's faces to be dropped."
                          (setq scheme-range-builds (1+ scheme-range-builds))
                          (apply scheme-ranges-original args)))
                       ((symbol-function 'search-backward)
-                       (lambda (&rest args)
-                         (ert-fail
-                          (format "unexpected mailto backscan: %S" args)))))
+                       (lambda (string &optional bound noerror count)
+                         (if (equal string "mailto:")
+                             (ert-fail
+                              (format "unexpected mailto backscan: %S"
+                                      (list string bound noerror count)))
+                           (funcall search-backward-original
+                                    string bound noerror count)))))
               (md-ts--fontify-bare-links (point-min) (point-max)))
             (should (= scheme-range-builds 1))
             (dotimes (n count)
@@ -4714,6 +4750,34 @@ inline parser ranges cause the first range's faces to be dropped."
             (cl-letf (((symbol-function 'browse-url)
                        (lambda (url &rest _args)
                          (setq opened url))))
+              (md-ts-open-link-at-point))
+            (should (equal opened "https://target.example"))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-open-at-point-no-fontify-parsed-narrowed ()
+  "`md-ts-open-link-at-point' should fontify a narrowed fresh link."
+  (let ((buf (generate-new-buffer " *md-ts-test*"))
+        opened)
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "Visit [here](https://target.example) now.\n")
+          (md-ts-mode)
+          (goto-char (point-min))
+          (search-forward "here")
+          (let ((beg (match-beginning 0))
+                (end (match-end 0)))
+            (should-not (button-at beg))
+            (narrow-to-region beg end)
+            (goto-char beg)
+            (cl-letf (((symbol-function 'browse-url)
+                       (lambda (url &rest _args)
+                         (setq opened url)))
+                      ((symbol-function 'find-file)
+                       (lambda (&rest _args)
+                         (ert-fail "find-file called for URI link")))
+                      ((symbol-function 'url-mailto)
+                       (lambda (&rest _args)
+                         (ert-fail "url-mailto called for URI link"))))
               (md-ts-open-link-at-point))
             (should (equal opened "https://target.example"))))
       (kill-buffer buf))))

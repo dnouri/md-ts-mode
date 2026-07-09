@@ -1755,7 +1755,7 @@ all font-lock state."
   "Non-button text properties that md-ts link UI must not overwrite.")
 
 (defun md-ts--legacy-link-button-p (button)
-  "Return non-nil if BUTTON has c102465's dynamic md-ts shape."
+  "Return non-nil if BUTTON has the legacy dynamic md-ts shape."
   (and (markerp button)
        (not (button-get button 'md-ts-link-button))
        (eq (button-get button 'action) #'md-ts--open-link-button)
@@ -1810,7 +1810,7 @@ all font-lock state."
        (eq (get-text-property pos 'action) #'md-ts--open-link-button)))
 
 (defun md-ts--legacy-dynamic-text-link-button-p (pos)
-  "Return non-nil if POS has c102465's dynamic md-ts text button."
+  "Return non-nil if POS has a legacy dynamic md-ts text button."
   (and (md-ts--text-button-at-p pos)
        (not (get-text-property pos 'md-ts-link-button))
        (eq (get-text-property pos 'action) #'md-ts--open-link-button)
