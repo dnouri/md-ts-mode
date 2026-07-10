@@ -3269,6 +3269,12 @@ intersecting region must clean md-ts-owned parsed-link and
 hide-markup text properties even if another region already updated
 the family fontification tick.")
 
+(defvar-local md-ts--font-lock-side-effect-modified-tick nil
+  "Buffer modified tick represented by shared side-effect dirty state.
+This is stored on the base buffer when one exists.  A mismatch
+means the buffer text changed without md-ts change hooks seeing the
+edit, such as through a non-md-ts indirect buffer.")
+
 (defun md-ts--font-lock-state-buffer ()
   "Return the buffer that owns shared font-lock side-effect state."
   (or (buffer-base-buffer) (current-buffer)))
@@ -3317,6 +3323,41 @@ the family fontification tick.")
     (with-current-buffer (md-ts--font-lock-state-buffer)
       (push (md-ts--font-lock-marker-range beg end)
             md-ts--font-lock-dirty-side-effect-bounds))))
+
+(defun md-ts--font-lock-side-effect-modified-tick ()
+  "Return the shared side-effect modified tick for this buffer family."
+  (with-current-buffer (md-ts--font-lock-state-buffer)
+    md-ts--font-lock-side-effect-modified-tick))
+
+(defun md-ts--font-lock-set-side-effect-modified-tick (tick)
+  "Set the shared side-effect modified TICK for this buffer family."
+  (with-current-buffer (md-ts--font-lock-state-buffer)
+    (setq md-ts--font-lock-side-effect-modified-tick tick)))
+
+(defun md-ts--font-lock-push-full-dirty-side-effect-bounds ()
+  "Mark the whole shared buffer as needing side-effect cleanup."
+  (with-current-buffer (md-ts--font-lock-state-buffer)
+    (save-restriction
+      (widen)
+      (md-ts--font-lock-push-dirty-side-effect-bounds
+       (point-min) (point-max)))))
+
+(defun md-ts--font-lock-initialize-side-effect-modified-tick ()
+  "Initialize the shared side-effect modified tick when absent."
+  (unless (md-ts--font-lock-side-effect-modified-tick)
+    (md-ts--font-lock-set-side-effect-modified-tick
+     (buffer-chars-modified-tick))))
+
+(defun md-ts--font-lock-mark-untracked-side-effect-dirty ()
+  "Mark full-buffer dirty state after an untracked text edit.
+Return non-nil when a modified-tick mismatch was found."
+  (let ((old-tick (md-ts--font-lock-side-effect-modified-tick))
+        (new-tick (buffer-chars-modified-tick)))
+    (unless (equal old-tick new-tick)
+      (when old-tick
+        (md-ts--font-lock-push-full-dirty-side-effect-bounds))
+      (md-ts--font-lock-set-side-effect-modified-tick new-tick)
+      t)))
 
 (defconst md-ts--font-lock-side-effect-properties
   '(md-ts-link-button md-ts-link-help-echo md-ts-link-static-target
@@ -3594,15 +3635,21 @@ touched by the change bounds."
          fontify-beg fontify-end
          md-ts--font-lock-bare-unsafe-context-node-queries t)))))
 
-(defun md-ts--font-lock-record-dirty-side-effect-bounds (beg end &rest _)
-  "Record changed line bounds BEG..END for later side-effect cleanup."
+(defun md-ts--font-lock-record-dirty-side-effect-bounds (beg end &rest args)
+  "Record changed line bounds BEG..END for later side-effect cleanup.
+ARGS is non-nil when called from `after-change-functions'."
+  (unless args
+    (md-ts--font-lock-mark-untracked-side-effect-dirty))
   (save-excursion
     (save-restriction
       (widen)
       (pcase-let ((`(,fontify-beg . ,fontify-end)
                    (md-ts--font-lock-context-line-fontify-bounds beg end)))
         (md-ts--font-lock-push-dirty-side-effect-bounds
-         fontify-beg fontify-end)))))
+         fontify-beg fontify-end))))
+  (when args
+    (md-ts--font-lock-set-side-effect-modified-tick
+     (buffer-chars-modified-tick))))
 
 (defun md-ts--font-lock-expand-bounds-for-side-effects (beg end)
   "Expand BEG..END to cover multi-line callback side-effect nodes.
@@ -3658,6 +3705,7 @@ mutate outside the bounds reported to jit-lock."
   "Fontify BEG to END with tree-sitter plus bare prose links.
 LOUDLY is passed to `treesit-font-lock-fontify-region'.  Return
 jit-lock bounds for the expanded physical lines fontified and bare-scanned."
+  (md-ts--font-lock-mark-untracked-side-effect-dirty)
   (pcase-let ((`(,fontify-beg . ,fontify-end)
                (md-ts--font-lock-expand-bounds-for-side-effects beg end)))
     (let ((dirty (md-ts--font-lock-consume-dirty-side-effect-bounds
@@ -3892,7 +3940,9 @@ buffers still clean old md-ts properties when the mode starts."
       (md-ts--remove-bare-link-button-properties (point-min) (point-max))
       (md-ts--remove-link-button-properties (point-min) (point-max)))
     (md-ts--font-lock-set-stale-side-effect-bounds nil)
-    (md-ts--font-lock-set-dirty-side-effect-bounds nil)))
+    (md-ts--font-lock-set-dirty-side-effect-bounds nil)
+    (md-ts--font-lock-set-side-effect-modified-tick
+     (buffer-chars-modified-tick))))
 
 (defun md-ts-setup ()
   "Setup treesit for `md-ts-mode'."
@@ -3910,6 +3960,7 @@ buffers still clean old md-ts properties when the mode starts."
   (setq-local font-lock-unfontify-region-function
               #'md-ts--font-lock-unfontify-region)
   (md-ts--setup-clean-side-effect-properties)
+  (md-ts--font-lock-initialize-side-effect-modified-tick)
   (add-hook 'before-change-functions
             #'md-ts--font-lock-record-dirty-side-effect-bounds nil t)
   (add-hook 'before-change-functions

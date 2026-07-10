@@ -4837,6 +4837,56 @@ inline parser ranges cause the first range's faces to be dropped."
         (kill-buffer indirect))
       (kill-buffer base))))
 
+(ert-deftest md-ts-test-link-indirect-non-md-edit-cleans-stale-parsed-link ()
+  "Non-md indirect edits should still dirty stale parsed-link UI."
+  (let ((base (md-ts-test--fontify
+               "Clean line.\nSee [Doc](https://example.com/doc) now.\n"))
+        viewer editor doc-marker)
+    (unwind-protect
+        (progn
+          (with-current-buffer base
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (setq doc-marker (copy-marker (match-beginning 0)))
+            (should (md-ts--link-button-p (button-at doc-marker)))
+            (should (equal (get-text-property doc-marker 'help-echo)
+                           "https://example.com/doc")))
+          (setq viewer (make-indirect-buffer base " *md-ts-viewer*" nil))
+          (with-current-buffer viewer
+            (md-ts-mode))
+          (setq editor (make-indirect-buffer base " *md-ts-editor*" nil))
+          (with-current-buffer editor
+            (fundamental-mode)
+            (should-not
+             (memq #'md-ts--font-lock-record-dirty-side-effect-bounds
+                   before-change-functions))
+            (goto-char (point-min))
+            (search-forward "[")
+            (delete-char -1))
+          (with-current-buffer viewer
+            (goto-char (point-min))
+            (funcall font-lock-fontify-region-function
+                     (line-beginning-position) (line-end-position) nil)
+            (goto-char (marker-position doc-marker))
+            (funcall font-lock-fontify-region-function
+                     (line-beginning-position) (line-end-position) nil))
+          (with-current-buffer base
+            (let ((doc-pos (marker-position doc-marker)))
+              (should (equal (buffer-substring-no-properties
+                              doc-pos (+ doc-pos 3))
+                             "Doc"))
+              (should-not (button-at doc-pos))
+              (dolist (prop '(button category action help-echo
+                                     md-ts-link-button
+                                     md-ts-link-help-echo
+                                     md-ts-link-static-target))
+                (should-not (get-text-property doc-pos prop))))))
+      (when (buffer-live-p editor)
+        (kill-buffer editor))
+      (when (buffer-live-p viewer)
+        (kill-buffer viewer))
+      (kill-buffer base))))
+
 (ert-deftest md-ts-test-link-bare-indirect-edit-base-cleans-stale-multiline-link ()
   "Stale multiline bounds recorded in an indirect buffer are shared."
   (let ((base (md-ts-test--fontify "[first\nsecond](https://parsed.example)\n"))
@@ -6391,6 +6441,54 @@ inline parser ranges cause the first range's faces to be dropped."
                        'md-ts--markup)))
       (when (buffer-live-p indirect)
         (kill-buffer indirect))
+      (kill-buffer base))))
+
+(ert-deftest md-ts-test-hide-markup-indirect-non-md-edit-cleans-stale-markup ()
+  "Non-md indirect edits should dirty stale shared markup hiding."
+  (let ((base (generate-new-buffer " *md-ts-test*"))
+        viewer editor)
+    (unwind-protect
+        (with-current-buffer base
+          (insert "# Heading\n\nClean line.\n")
+          (md-ts-mode)
+          (setq-local md-ts-hide-markup t)
+          (font-lock-ensure)
+          (should (eq (get-text-property (point-min) 'invisible)
+                      'md-ts--markup))
+          (should (eq (get-text-property (1+ (point-min)) 'invisible)
+                      'md-ts--markup))
+          (setq viewer (make-indirect-buffer base " *md-ts-viewer*" nil))
+          (with-current-buffer viewer
+            (md-ts-mode))
+          (setq editor (make-indirect-buffer base " *md-ts-editor*" nil))
+          (with-current-buffer editor
+            (fundamental-mode)
+            (should-not
+             (memq #'md-ts--font-lock-record-dirty-side-effect-bounds
+                   before-change-functions))
+            (goto-char (point-min))
+            (delete-char 1))
+          (with-current-buffer viewer
+            (goto-char (point-min))
+            (search-forward "Clean line.")
+            (funcall font-lock-fontify-region-function
+                     (line-beginning-position) (line-end-position) nil)
+            (goto-char (point-min))
+            (funcall font-lock-fontify-region-function
+                     (line-beginning-position) (line-end-position) nil))
+          (should (equal (buffer-substring-no-properties
+                          (point-min) (+ (point-min) 8))
+                         " Heading"))
+          (should-not (md-ts-test--invisible-includes-p
+                       (get-text-property (point-min) 'invisible)
+                       'md-ts--markup))
+          (should-not (md-ts-test--invisible-includes-p
+                       (get-text-property (1+ (point-min)) 'invisible)
+                       'md-ts--markup)))
+      (when (buffer-live-p editor)
+        (kill-buffer editor))
+      (when (buffer-live-p viewer)
+        (kill-buffer viewer))
       (kill-buffer base))))
 
 (ert-deftest md-ts-test-hide-markup-indirect-disabled-preserves-base-hidden ()

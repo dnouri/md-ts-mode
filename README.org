@@ -134,12 +134,16 @@ installed and its grammar available for highlighting to work.
 
 ** Development
 
-Run ~make check~ before sending changes.  ~make perf~ runs advisory
-link fontification benchmarks; compare =RESULT= lines from runs on the
-same machine rather than treating them as pass/fail thresholds.  Benchmark
-=RESULT= lines include tracked dirty/untracked state and link-artifact
-counts.  ~make perf-smoke~ validates the local grammar and link-artifact
-path only; CI, not this smoke target, covers the supported runtime matrix.
+Run ~make check~ before sending changes.  Test and smoke targets first
+verify that the selected =EMACS= uses a supported libtree-sitter runtime;
+if a distro Emacs links to an older runtime such as 0.22, use
+=scripts/setup-tree-sitter-runtime.sh= as shown by the failure message.
+~make perf~ runs advisory link fontification benchmarks; compare =RESULT=
+lines from runs on the same machine rather than treating them as pass/fail
+thresholds.  Benchmark =RESULT= lines include tracked dirty/untracked state
+and link-artifact counts.  ~make perf-smoke~ validates the local grammar and
+link-artifact path only; CI, not this smoke target, covers the supported
+runtime matrix.
 
 
 ** Compatibility

@@ -16,11 +16,12 @@ $(error PERF_ITERATIONS must be a positive integer)
 endif
 endif
 
-.PHONY: test compile compile-tests compile-benchmark perf-smoke lint lint-checkdoc lint-package check check-parens clean help install-hooks snapshot perf
+.PHONY: test check-runtime compile compile-tests compile-benchmark perf-smoke lint lint-checkdoc lint-package check check-parens clean help install-hooks snapshot perf
 
 help:
 	@echo "Targets:"
 	@echo "  make test           Run ERT tests (SELECTOR=pattern, VERBOSE=1)"
+	@echo "  make check-runtime  Verify supported Emacs/libtree-sitter runtime"
 	@echo "  make compile        Byte-compile package with warnings-as-errors"
 	@echo "  make compile-tests  Byte-compile tests with warnings-as-errors"
 	@echo "  make compile-benchmark  Byte-compile benchmark tooling"
@@ -35,7 +36,7 @@ help:
 	@echo "  make install-hooks  Set up git pre-commit hook"
 	@echo "  make clean          Remove .elc files"
 
-test: compile
+test: check-runtime compile
 	@echo "=== Tests ==="
 	@OUTPUT=$$(mktemp); \
 	$(BATCH) \
@@ -53,6 +54,9 @@ test: compile
 	fi; \
 	rm -f $$OUTPUT; \
 	exit $$STATUS
+
+check-runtime:
+	@./scripts/check-tree-sitter-runtime.sh "$(EMACS)"
 
 compile:
 	@rm -f *.elc
@@ -133,13 +137,13 @@ perf:
 		$(BATCH) \
 		-l scripts/benchmark-document-links.el
 
-perf-smoke:
+perf-smoke: check-runtime
 	@echo "=== Perf smoke ==="
 	@PERF_ITERATIONS=1 MD_TS_BENCH_SMOKE=1 \
 		$(BATCH) \
 		-l scripts/benchmark-document-links.el
 
-check: compile compile-tests compile-benchmark perf-smoke lint test
+check: check-runtime compile compile-tests compile-benchmark perf-smoke lint test
 
 install-hooks:
 	@git config core.hooksPath hooks
