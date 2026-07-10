@@ -2971,6 +2971,41 @@ valid email-like token would make the practical `mailto:' candidate valid."
           (setq ranges
                 (md-ts--bare-invalid-mailto-uri-ranges scan-beg scan-end))))))
 
+(defun md-ts--bare-valid-mailto-uri-ranges (scan-beg scan-end url-ranges-cache)
+  "Return valid standalone bare `mailto:' ranges in SCAN-BEG..SCAN-END.
+URL-RANGES-CACHE is a nullary function returning generic URL ranges,
+used to keep outer generic URLs ahead of embedded `mailto:' text."
+  (let (ranges)
+    (save-excursion
+      (save-match-data
+        (let ((case-fold-search t))
+          (goto-char scan-beg)
+          (while (re-search-forward md-ts--bare-mailto-uri-regexp scan-end t)
+            (pcase-let* ((prefix-beg (match-beginning 0))
+                         (prefix-end (match-end 0))
+                         (`(,match-beg ,match-end ,_text ,token-end)
+                          (md-ts--bare-mailto-uri-candidate
+                           prefix-beg prefix-end scan-end)))
+              (when (and match-beg
+                         (not (md-ts--bare-mailto-uri-skip-p
+                               match-beg match-end
+                               (funcall url-ranges-cache))))
+                (push (cons match-beg match-end) ranges))
+              (goto-char token-end))))))
+    (md-ts--bare-link-sort-merge-ranges ranges)))
+
+(defun md-ts--bare-valid-mailto-uri-range-cache
+    (scan-beg scan-end url-ranges-cache)
+  "Return a cache for valid standalone `mailto:' ranges.
+SCAN-BEG and SCAN-END bound the cached scan.  URL-RANGES-CACHE is
+passed to `md-ts--bare-valid-mailto-uri-ranges'."
+  (let (ranges)
+    (lambda ()
+      (or ranges
+          (setq ranges
+                (md-ts--bare-valid-mailto-uri-ranges
+                 scan-beg scan-end url-ranges-cache))))))
+
 (defun md-ts--regions-intersect-p (beg end other-beg other-end)
   "Return non-nil when BEG..END intersects OTHER-BEG..OTHER-END."
   (if (= other-beg other-end)
@@ -3149,21 +3184,30 @@ bare `mailto:' form can own URL-like text inside its query."
             (cons (aref range 0) (aref range 1)))
           (append url-ranges nil)))
 
-(defun md-ts--bare-email-excluded-ranges (invalid-mailto-ranges url-ranges)
+(defun md-ts--bare-email-excluded-ranges
+    (invalid-mailto-ranges url-ranges &optional valid-mailto-ranges)
   "Return ranges where bare email fallback should not scan.
-INVALID-MAILTO-RANGES and URL-RANGES are sorted vectors."
+INVALID-MAILTO-RANGES, URL-RANGES, and VALID-MAILTO-RANGES are sorted
+vectors."
   (md-ts--bare-link-sort-merge-ranges
    (append (append invalid-mailto-ranges nil)
+           (append valid-mailto-ranges nil)
            (md-ts--bare-link-generic-url-normal-ranges url-ranges))))
 
-(defun md-ts--fontify-bare-url-ranges (url-ranges apply-beg apply-end)
-  "Fontify cached URL-RANGES intersecting APPLY-BEG to APPLY-END."
+(defun md-ts--fontify-bare-url-ranges
+    (url-ranges apply-beg apply-end &optional excluded-ranges)
+  "Fontify cached URL-RANGES intersecting APPLY-BEG to APPLY-END.
+When EXCLUDED-RANGES is non-nil, skip URL ranges intersecting those
+sorted cons ranges."
   (dotimes (index (length url-ranges))
     (let* ((range (aref url-ranges index))
            (beg (aref range 0))
            (end (aref range 1))
            (target (aref range 3)))
       (when (and (md-ts--regions-intersect-p beg end apply-beg apply-end)
+                 (not (and excluded-ranges
+                           (md-ts--range-intersects-sorted-ranges-p
+                            beg end excluded-ranges)))
                  (not (md-ts--button-shared-text-blocker-in-region-p
                        beg end))
                  (not (md-ts--foreign-interactive-property-in-region-p
@@ -3200,9 +3244,11 @@ URL-RANGES are cached generic URL ranges used to detect outer bare URLs."
   "Fontify practical bare `mailto:' forms between SCAN-BEG and SCAN-END.
 Only matches intersecting APPLY-BEG to APPLY-END are applied.  Candidate
 bodies are scanned linearly.  URL-RANGES-CACHE is a nullary function returning
-generic URL ranges for outer-URL precedence.  Return invalid mailto token
-ranges that later email scans may skip."
-  (let (invalid-ranges)
+generic URL ranges for outer-URL precedence.  Return a cons of sorted
+invalid token ranges and valid standalone mailto ranges that later URL/email
+scans may skip."
+  (let (invalid-ranges
+        valid-ranges)
     (goto-char scan-beg)
     (while (re-search-forward md-ts--bare-mailto-uri-regexp scan-end t)
       (pcase-let* ((prefix-beg (match-beginning 0))
@@ -3211,16 +3257,21 @@ ranges that later email scans may skip."
                     (md-ts--bare-mailto-uri-candidate
                      prefix-beg prefix-end scan-end)))
         (if match-beg
-            (when (and (md-ts--regions-intersect-p
-                        match-beg match-end apply-beg apply-end)
-                       (not (md-ts--bare-mailto-uri-skip-p
-                             match-beg match-end (funcall url-ranges-cache)))
-                       (md-ts--bare-link-candidate-valid-p
-                        match-beg match-end text t))
-              (md-ts--fontify-bare-link match-beg match-end text))
+            (let ((skip-mailto
+                   (md-ts--bare-mailto-uri-skip-p
+                    match-beg match-end (funcall url-ranges-cache))))
+              (unless skip-mailto
+                (push (cons match-beg match-end) valid-ranges))
+              (when (and (md-ts--regions-intersect-p
+                          match-beg match-end apply-beg apply-end)
+                         (not skip-mailto)
+                         (md-ts--bare-link-candidate-valid-p
+                          match-beg match-end text t))
+                (md-ts--fontify-bare-link match-beg match-end text)))
           (push (cons prefix-beg token-end) invalid-ranges))
         (goto-char token-end)))
-    (md-ts--bare-link-sort-merge-ranges invalid-ranges)))
+    (cons (md-ts--bare-link-sort-merge-ranges invalid-ranges)
+          (md-ts--bare-link-sort-merge-ranges valid-ranges))))
 
 (defun md-ts--bare-scheme-mailto-uri-ranges (scan-beg scan-end)
   "Return scheme-prefixed `mailto:' ranges between SCAN-BEG and SCAN-END.
@@ -3288,19 +3339,22 @@ Operate on lines covering BEG to END."
                 ;; mailto owns URL-like query text.  Skip it when a cached
                 ;; earlier generic URL covers it, so outer URLs own embedded
                 ;; mailto without rescanning the line for every mailto.
-                (let ((invalid-mailto-ranges
-                       (md-ts--fontify-bare-mailto-uris
-                        scan-beg scan-end scan-beg scan-end
-                        generic-url-containment-ranges-cache)))
+                (let* ((mailto-ranges
+                         (md-ts--fontify-bare-mailto-uris
+                          scan-beg scan-end scan-beg scan-end
+                          generic-url-containment-ranges-cache))
+                       (invalid-mailto-ranges (car mailto-ranges))
+                       (valid-mailto-ranges (cdr mailto-ranges)))
                   (md-ts--fontify-bare-url-ranges
                    (funcall generic-url-containment-ranges-cache)
-                   scan-beg scan-end)
+                   scan-beg scan-end valid-mailto-ranges)
                   (md-ts--fontify-bare-links-with-regexp-outside-ranges
                    goto-address-mail-regexp
                    scan-beg scan-end
                    (md-ts--bare-email-excluded-ranges
                     invalid-mailto-ranges
-                    (funcall generic-url-containment-ranges-cache))
+                    (funcall generic-url-containment-ranges-cache)
+                    valid-mailto-ranges)
                    scan-beg scan-end
                    (lambda (address) (concat "mailto:" address))
                    (lambda (match-beg match-end _text)
@@ -3887,6 +3941,9 @@ has the same meaning as in `md-ts--bare-link-candidate-valid-p'."
                    (invalid-mailto-ranges-cache
                     (md-ts--bare-invalid-mailto-uri-range-cache
                      line-beg line-end))
+                   (valid-mailto-ranges-cache
+                    (md-ts--bare-valid-mailto-uri-range-cache
+                     line-beg line-end generic-url-containment-ranges-cache))
                    (scheme-mailto-ranges-cache
                     (md-ts--bare-scheme-mailto-uri-range-cache
                      line-beg line-end)))
@@ -3896,15 +3953,21 @@ has the same meaning as in `md-ts--bare-link-candidate-valid-p'."
               (or (md-ts--bare-mailto-uri-target-at-point
                    pos line-beg line-end generic-url-containment-ranges-cache
                    check-overlap)
-                  (md-ts--bare-link-target-at-point-with-regexp
-                   pos goto-address-url-regexp line-beg line-end #'identity
-                   nil nil check-overlap)
+                  (when-let* ((url-segment
+                                (md-ts--range-outside-sorted-ranges-containing-pos
+                                 pos line-beg line-end
+                                 (funcall valid-mailto-ranges-cache))))
+                    (md-ts--bare-link-target-at-point-with-regexp
+                     pos goto-address-url-regexp
+                     (car url-segment) (cdr url-segment) #'identity
+                     nil nil check-overlap))
                   (when-let* ((email-segment
                                 (md-ts--range-outside-sorted-ranges-containing-pos
                                  pos line-beg line-end
                                  (md-ts--bare-email-excluded-ranges
                                   (funcall invalid-mailto-ranges-cache)
-                                  (funcall generic-url-containment-ranges-cache)))))
+                                  (funcall generic-url-containment-ranges-cache)
+                                  (funcall valid-mailto-ranges-cache)))))
                     (md-ts--bare-link-target-at-point-with-regexp
                      pos goto-address-mail-regexp
                      (car email-segment) (cdr email-segment)

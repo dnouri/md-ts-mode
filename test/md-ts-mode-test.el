@@ -2964,6 +2964,52 @@ inline parser ranges cause the first range's faces to be dropped."
       (md-ts-test--open-link-at-search-no-fontify text "https://example.com"))
     (should (equal mailed '("mailto" "?body=https://example.com")))))
 
+(ert-deftest md-ts-test-link-bare-mailto-foreign-prefix-suppresses-inner-links ()
+  "A foreign button on `mailto:' should not expose truncated inner links."
+  (let* ((target "mailto:me@example.com?body=https://example.com")
+         (buf (generate-new-buffer " *md-ts-test*"))
+         called
+         mailed)
+    (unwind-protect
+        (with-current-buffer buf
+          (insert (format "Contact %s now.\n" target))
+          (md-ts-mode)
+          (goto-char (point-min))
+          (search-forward "mailto:")
+          (let ((prefix-beg (match-beginning 0))
+                (prefix-end (match-end 0)))
+            (make-text-button prefix-beg prefix-end
+                              'action (lambda (_button)
+                                        (setq called t))
+                              'help-echo "foreign")
+            (font-lock-ensure)
+            (let ((prefix-button (button-at prefix-beg)))
+              (should prefix-button)
+              (should-not (md-ts--link-button-p prefix-button)))
+            (dolist (inner '("me@example.com" "https://example.com"))
+              (goto-char (point-min))
+              (search-forward inner)
+              (let ((pos (match-beginning 0)))
+                (should-not (button-at pos))
+                (should-not (get-text-property pos 'md-ts-link-static-target))
+                (should-not (get-text-property pos 'md-ts-bare-link-face))
+                (should-not (md-ts--bare-link-target-at-point pos 'foreign))))
+            (goto-char (point-min))
+            (search-forward "me@example.com")
+            (goto-char (match-beginning 0))
+            (cl-letf (((symbol-function 'url-mailto)
+                       (lambda (parsed-url)
+                         (setq mailed (list (url-type parsed-url)
+                                            (url-filename parsed-url)))))
+                      ((symbol-function 'browse-url)
+                       (lambda (&rest _args)
+                         (ert-fail "browse-url called for bare mailto URI"))))
+              (md-ts-open-link-at-point))
+            (should (equal mailed
+                           '("mailto" "me@example.com?body=https://example.com")))
+            (should-not called)))
+      (kill-buffer buf))))
+
 (ert-deftest md-ts-test-link-bare-mailto-query-scheme-owned-by-mailto ()
   "Explicit mailto URIs should own scheme-looking query text."
   (let* ((target "mailto:me@example.com?subject=tel:123")

@@ -461,6 +461,8 @@ fi
 tree_sitter_display=()
 tree_sitter_candidate_names=()
 tree_sitter_candidate_sources=()
+tree_sitter_effective_candidate_names=()
+tree_sitter_effective_candidate_sources=()
 tree_sitter_direct_dependency_names=()
 tree_sitter_direct_library_paths=()
 direct_dependency_scan_reliable=false
@@ -509,6 +511,37 @@ append_tree_sitter_candidate() {
 
   tree_sitter_candidate_names+=("$name")
   tree_sitter_candidate_sources+=("$source")
+}
+
+append_tree_sitter_effective_candidate() {
+  local source=$1
+  local name=$2
+  local existing_source=""
+  local existing_name=""
+  local i=0
+
+  name=${name##*/}
+  name=${name%:}
+  name=${name%,}
+  if [ -z "$name" ]; then
+    return 0
+  fi
+  case "$name" in
+    *libtree-sitter*) ;;
+    *) return 0 ;;
+  esac
+
+  while [ "$i" -lt "${#tree_sitter_effective_candidate_names[@]}" ]; do
+    existing_name=${tree_sitter_effective_candidate_names[$i]}
+    existing_source=${tree_sitter_effective_candidate_sources[$i]}
+    if [ "$existing_name" = "$name" ] && [ "$existing_source" = "$source" ]; then
+      return 0
+    fi
+    i=$((i + 1))
+  done
+
+  tree_sitter_effective_candidate_names+=("$name")
+  tree_sitter_effective_candidate_sources+=("$source")
 }
 
 append_tree_sitter_direct_dependency_name() {
@@ -725,6 +758,9 @@ record_readelf_metadata_names() {
   local line=""
   local name=""
   local source=""
+  local soname=""
+  local -a needed_names=()
+  local needed=""
 
   while IFS= read -r line; do
     case "$line" in
@@ -736,7 +772,23 @@ record_readelf_metadata_names() {
     name=${line#*[}
     name=${name%%]*}
     record_tree_sitter_token "$source" "$name"
+    case "$name" in
+      *libtree-sitter*)
+        case "$source" in
+          "ELF NEEDED"*) needed_names+=("$name") ;;
+          "ELF SONAME"*) soname=$name ;;
+        esac
+        ;;
+    esac
   done <<< "$output"
+
+  if [ "${#needed_names[@]}" -gt 0 ]; then
+    for needed in "${needed_names[@]}"; do
+      append_tree_sitter_effective_candidate "ELF NEEDED leaf for $base" "$needed"
+    done
+  elif [ -n "$soname" ]; then
+    append_tree_sitter_effective_candidate "ELF SONAME leaf for $base" "$soname"
+  fi
 }
 
 record_readelf_direct_dependency_names() {
@@ -778,10 +830,12 @@ inspect_tree_sitter_library_metadata() {
   local otool_bin=""
   local output=""
   local base=""
+  local effective_before=0
 
   while [ "$i" -lt "${#tree_sitter_direct_library_paths[@]}" ]; do
     path=${tree_sitter_direct_library_paths[$i]}
     base=${path##*/}
+    effective_before=${#tree_sitter_effective_candidate_names[@]}
 
     if readelf_bin=$(command -v readelf 2>/dev/null); then
       output=$(run_detector "$readelf_bin" -d "$path" 2>/dev/null || true)
@@ -800,6 +854,10 @@ inspect_tree_sitter_library_metadata() {
       if [ -n "$output" ]; then
         parse_otool_tree_sitter_output "$output" "Mach-O dependency for $base"
       fi
+    fi
+
+    if [ "${#tree_sitter_effective_candidate_names[@]}" -eq "$effective_before" ]; then
+      append_tree_sitter_effective_candidate "resolved library path leaf for $base" "$path"
     fi
 
     i=$((i + 1))
@@ -844,17 +902,35 @@ supported=false
 version_visible=false
 supported_detail=""
 visible_version_summary=""
+effective_runtime_candidates=false
+unsupported_effective_detail=""
 
 evaluate_tree_sitter_runtime() {
   local i=0
+  local count=0
   local name=""
   local source=""
   local minor=""
   local detail=""
+  local supported_seen=false
+  local unsupported_seen=false
 
-  while [ "$i" -lt "${#tree_sitter_candidate_names[@]}" ]; do
-    name=${tree_sitter_candidate_names[$i]}
-    source=${tree_sitter_candidate_sources[$i]}
+  if [ "${#tree_sitter_effective_candidate_names[@]}" -gt 0 ]; then
+    effective_runtime_candidates=true
+    count=${#tree_sitter_effective_candidate_names[@]}
+  else
+    effective_runtime_candidates=false
+    count=${#tree_sitter_candidate_names[@]}
+  fi
+
+  while [ "$i" -lt "$count" ]; do
+    if [ "$effective_runtime_candidates" = true ]; then
+      name=${tree_sitter_effective_candidate_names[$i]}
+      source=${tree_sitter_effective_candidate_sources[$i]}
+    else
+      name=${tree_sitter_candidate_names[$i]}
+      source=${tree_sitter_candidate_sources[$i]}
+    fi
 
     if minor=$(extract_tree_sitter_minor "$name"); then
       version_visible=true
@@ -866,14 +942,26 @@ evaluate_tree_sitter_runtime() {
       fi
 
       if tree_sitter_minor_supported "$minor"; then
-        supported=true
-        supported_detail=$detail
-        return 0
+        supported_seen=true
+        if [ -z "$supported_detail" ]; then
+          supported_detail=$detail
+        fi
+      else
+        unsupported_seen=true
+        if [ -z "$unsupported_effective_detail" ]; then
+          unsupported_effective_detail=$detail
+        fi
       fi
     fi
 
     i=$((i + 1))
   done
+
+  if [ "$effective_runtime_candidates" = true ] && [ "$unsupported_seen" = true ]; then
+    supported=false
+  elif [ "$supported_seen" = true ]; then
+    supported=true
+  fi
 }
 
 if emacs_exe_is_executable; then
@@ -922,6 +1010,8 @@ if [ "$direct_dependency_scan_reliable" != true ] && \
     [ "$fallback_ldd_tree_sitter_entries" -gt 1 ]; then
   tree_sitter_candidate_names=()
   tree_sitter_candidate_sources=()
+  tree_sitter_effective_candidate_names=()
+  tree_sitter_effective_candidate_sources=()
   tree_sitter_direct_library_paths=()
 fi
 

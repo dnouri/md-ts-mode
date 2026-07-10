@@ -148,6 +148,66 @@ printf '%s\n' '\tlibtree-sitter.so.0.22 => $misleading_path_lib/libtree-sitter.s
 EOF
 chmod +x "$misleading_path_bin/ldd"
 
+facade_025_real_022_bin=$probe_dir/facade-025-real-022-bin
+facade_025_real_022_lib=$probe_dir/facade-025-real-022/lib
+mkdir -p "$facade_025_real_022_bin" "$facade_025_real_022_lib"
+cp "$fake_bin/emacs" "$facade_025_real_022_bin/emacs"
+: >"$facade_025_real_022_lib/libtree-sitter.so.0.22"
+ln -s "libtree-sitter.so.0.22" \
+  "$facade_025_real_022_lib/libtree-sitter.so.0.25"
+cat >"$facade_025_real_022_bin/ldd" <<EOF
+#!$sh_bin
+printf '%s\n' 'libtree-sitter.so.0.25 => $facade_025_real_022_lib/libtree-sitter.so.0.25 (0x00000000)'
+EOF
+chmod +x "$facade_025_real_022_bin/ldd"
+cat >"$facade_025_real_022_bin/readelf" <<EOF
+#!$sh_bin
+last=
+for last do :; done
+case "\$last" in
+  */emacs)
+    printf '%s\n' ' 0x0000000000000001 (NEEDED)             Shared library: [libtree-sitter.so.0.25]'
+    ;;
+  */libtree-sitter.so.0.22|*/libtree-sitter.so.0.25)
+    printf '%s\n' ' 0x000000000000000e (SONAME)             Library soname: [libtree-sitter.so.0.22]'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "$facade_025_real_022_bin/readelf"
+
+facade_025_real_026_bin=$probe_dir/facade-025-real-026-bin
+facade_025_real_026_lib=$probe_dir/facade-025-real-026/lib
+mkdir -p "$facade_025_real_026_bin" "$facade_025_real_026_lib"
+cp "$fake_bin/emacs" "$facade_025_real_026_bin/emacs"
+: >"$facade_025_real_026_lib/libtree-sitter.so.0.26"
+ln -s "libtree-sitter.so.0.26" \
+  "$facade_025_real_026_lib/libtree-sitter.so.0.25"
+cat >"$facade_025_real_026_bin/ldd" <<EOF
+#!$sh_bin
+printf '%s\n' 'libtree-sitter.so.0.25 => $facade_025_real_026_lib/libtree-sitter.so.0.25 (0x00000000)'
+EOF
+chmod +x "$facade_025_real_026_bin/ldd"
+cat >"$facade_025_real_026_bin/readelf" <<EOF
+#!$sh_bin
+last=
+for last do :; done
+case "\$last" in
+  */emacs)
+    printf '%s\n' ' 0x0000000000000001 (NEEDED)             Shared library: [libtree-sitter.so.0.25]'
+    ;;
+  */libtree-sitter.so.0.26|*/libtree-sitter.so.0.25)
+    printf '%s\n' ' 0x000000000000000e (SONAME)             Library soname: [libtree-sitter.so.0.26]'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "$facade_025_real_026_bin/readelf"
+
 supported_shim_bin=$probe_dir/supported-shim-bin
 supported_shim_lib="$probe_dir/custom runtime/lib"
 mkdir -p "$supported_shim_bin" "$supported_shim_lib"
@@ -325,6 +385,12 @@ run_probe "unsupported plain emacs fails" fail \
 
 run_probe "misleading 0.25 path with 0.22 basename fails" fail \
   env PATH="$misleading_path_bin:$PATH" EMACS=emacs "$check_script"
+
+run_probe "0.25 facade resolving to real 0.22 fails" fail \
+  env PATH="$facade_025_real_022_bin:$PATH" EMACS=emacs "$check_script"
+
+run_probe "Emacs 30 0.25 facade resolving to real 0.26 fails" fail \
+  env PATH="$facade_025_real_026_bin:$PATH" EMACS=emacs "$check_script"
 
 run_probe "space path setup shim with real 0.25 passes" pass \
   env PATH="$supported_shim_bin:$PATH" EMACS=emacs "$check_script"
