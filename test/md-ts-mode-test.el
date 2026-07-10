@@ -4422,6 +4422,39 @@ inline parser ranges cause the first range's faces to be dropped."
           (should-not (button-at parsed-pos)))
       (kill-buffer buf))))
 
+(ert-deftest md-ts-test-live-reload-backfills-legacy-display-ownership ()
+  "Live reload should migrate legacy untagged md-ts display props."
+  (let ((buf (generate-new-buffer " *md-ts-test-live-reload-display*"))
+        task-pos rule-pos)
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "- [ ] todo\n\n---\n")
+          (md-ts-mode)
+          (font-lock-ensure)
+          (goto-char (point-min))
+          (search-forward "[ ]")
+          (setq task-pos (match-beginning 0))
+          (search-forward "---")
+          (setq rule-pos (match-beginning 0))
+          (should (equal (get-text-property task-pos 'display) "☐"))
+          (should (get-text-property task-pos 'md-ts-display))
+          (should (get-text-property rule-pos 'display))
+          (should (get-text-property rule-pos 'md-ts-display))
+          (remove-text-properties (point-min) (point-max)
+                                  '(md-ts-display nil))
+          (should-not (get-text-property task-pos 'md-ts-display))
+          (should-not (get-text-property rule-pos 'md-ts-display))
+          (kill-local-variable 'md-ts--side-effect-properties-owner)
+          (md-ts--backfill-side-effect-properties-ownership)
+          (should (equal (get-text-property task-pos 'md-ts-display) "☐"))
+          (should (get-text-property rule-pos 'md-ts-display))
+          (fundamental-mode)
+          (should (eq major-mode 'fundamental-mode))
+          (dolist (pos (list task-pos rule-pos))
+            (should-not (get-text-property pos 'display))
+            (should-not (get-text-property pos 'md-ts-display))))
+      (kill-buffer buf))))
+
 (ert-deftest md-ts-test-live-reload-backfills-hookless-cleanup-owner ()
   "Live reload should backfill hookless md-ts buffers and cleanup hooks."
   (let ((buf (generate-new-buffer " *md-ts-test-live-reload-hookless*"))
@@ -5178,6 +5211,45 @@ inline parser ranges cause the first range's faces to be dropped."
                 (should-not (get-text-property doc-pos prop))))))
       (when (buffer-live-p editor)
         (kill-buffer editor))
+      (when (buffer-live-p viewer)
+        (kill-buffer viewer))
+      (kill-buffer base))))
+
+(ert-deftest md-ts-test-link-indirect-base-mode-exit-non-md-edit-cleans-stale-parsed-link ()
+  "Non-md base edits after base mode exit should dirty indirect link UI."
+  (let ((base (md-ts-test--fontify
+               "Clean line.\nSee [Doc](https://example.com/doc) now.\n"))
+        viewer doc-marker)
+    (unwind-protect
+        (progn
+          (with-current-buffer base
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (setq doc-marker (copy-marker (match-beginning 0)))
+            (should (md-ts--link-button-p (button-at doc-marker))))
+          (setq viewer (make-indirect-buffer base " *md-ts-viewer*" nil))
+          (with-current-buffer viewer
+            (md-ts-mode))
+          (with-current-buffer base
+            (fundamental-mode)
+            (goto-char (point-min))
+            (search-forward "[")
+            (delete-char -1))
+          (with-current-buffer viewer
+            (goto-char (marker-position doc-marker))
+            (funcall font-lock-fontify-region-function
+                     (line-beginning-position) (line-end-position) nil))
+          (with-current-buffer base
+            (let ((doc-pos (marker-position doc-marker)))
+              (should (equal (buffer-substring-no-properties
+                              doc-pos (+ doc-pos 3))
+                             "Doc"))
+              (should-not (button-at doc-pos))
+              (dolist (prop '(button category action help-echo
+                                     md-ts-link-button
+                                     md-ts-link-help-echo
+                                     md-ts-link-static-target))
+                (should-not (get-text-property doc-pos prop))))))
       (when (buffer-live-p viewer)
         (kill-buffer viewer))
       (kill-buffer base))))
@@ -6782,6 +6854,41 @@ inline parser ranges cause the first range's faces to be dropped."
                        'md-ts--markup)))
       (when (buffer-live-p editor)
         (kill-buffer editor))
+      (when (buffer-live-p viewer)
+        (kill-buffer viewer))
+      (kill-buffer base))))
+
+(ert-deftest md-ts-test-hide-markup-indirect-base-mode-exit-non-md-edit-cleans-stale-markup ()
+  "Non-md base edits after base mode exit should dirty indirect hidden markup."
+  (let ((base (generate-new-buffer " *md-ts-test*"))
+        viewer)
+    (unwind-protect
+        (with-current-buffer base
+          (insert "# Heading\n\nClean line.\n")
+          (md-ts-mode)
+          (setq-local md-ts-hide-markup t)
+          (font-lock-ensure)
+          (should (eq (get-text-property (point-min) 'invisible)
+                      'md-ts--markup))
+          (setq viewer (make-indirect-buffer base " *md-ts-viewer*" nil))
+          (with-current-buffer viewer
+            (md-ts-mode))
+          (fundamental-mode)
+          (goto-char (point-min))
+          (delete-char 1)
+          (with-current-buffer viewer
+            (goto-char (point-min))
+            (funcall font-lock-fontify-region-function
+                     (line-beginning-position) (line-end-position) nil))
+          (should (equal (buffer-substring-no-properties
+                          (point-min) (+ (point-min) 8))
+                         " Heading"))
+          (should-not (md-ts-test--invisible-includes-p
+                       (get-text-property (point-min) 'invisible)
+                       'md-ts--markup))
+          (should-not (md-ts-test--invisible-includes-p
+                       (get-text-property (1+ (point-min)) 'invisible)
+                       'md-ts--markup)))
       (when (buffer-live-p viewer)
         (kill-buffer viewer))
       (kill-buffer base))))

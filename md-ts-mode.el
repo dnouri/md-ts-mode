@@ -2428,6 +2428,58 @@ left intact."
       (setq pos (or (next-property-change pos nil end) end)))
     found))
 
+(defun md-ts--legacy-thematic-break-source-p (text)
+  "Return non-nil when TEXT is Markdown thematic-break source."
+  (or (string-match-p "\\`[ \t]*\\(?:-[ \t]*\\)\\{3,\\}\\'" text)
+      (string-match-p "\\`[ \t]*\\(?:\\*[ \t]*\\)\\{3,\\}\\'" text)
+      (string-match-p "\\`[ \t]*\\(?:_[ \t]*\\)\\{3,\\}\\'" text)))
+
+(defun md-ts--legacy-display-property-p (beg end display)
+  "Return non-nil for md-ts-made legacy unowned DISPLAY from BEG to END."
+  (let ((text (buffer-substring-no-properties beg end)))
+    (when (string-suffix-p "\n" text)
+      (setq text (substring text 0 -1)))
+    (or (and (equal display "☐")
+             (string= text "[ ]"))
+        (and (equal display "☑")
+             (string-match-p "\\`\\[[xX]\\]\\'" text))
+        (and (stringp display)
+             (string-match-p "\\`─\\{3,\\}\\'" display)
+             (md-ts--legacy-thematic-break-source-p text)))))
+
+(defun md-ts--migrate-legacy-display-properties (beg end)
+  "Tag legacy md-ts `display' properties from BEG to END with ownership.
+
+Older live-reloaded buffers can have task-list and thematic-break
+`display' properties created before `md-ts-display' existed.  Only
+syntax-shaped legacy displays are tagged, so ordinary foreign
+`display' properties keep blocking md-ts ownership."
+  (with-silent-modifications
+    (let ((inhibit-read-only t))
+      (save-restriction
+        (widen)
+        (let ((pos (min (max beg (point-min)) (point-max)))
+              (limit (min (max end (point-min)) (point-max))))
+          (while (< pos limit)
+            (let ((display (get-text-property pos 'display)))
+              (if (and display
+                       (not (get-text-property pos 'md-ts-display)))
+                  (let ((span-beg (or (previous-single-property-change
+                                       (min (1+ pos) (point-max))
+                                       'display nil (point-min))
+                                      (point-min)))
+                        (span-end (or (next-single-property-change
+                                       pos 'display nil (point-max))
+                                      (point-max))))
+                    (when (md-ts--legacy-display-property-p
+                           span-beg span-end display)
+                      (put-text-property span-beg span-end
+                                         'md-ts-display display))
+                    (setq pos (min limit (max (1+ pos) span-end))))
+                (setq pos (or (next-single-property-change
+                               pos 'display nil limit)
+                              limit))))))))))
+
 (defun md-ts--put-display-property (beg end display)
   "Set md-ts-owned DISPLAY property from BEG to END."
   (unless (md-ts--foreign-display-property-in-region-p beg end)
@@ -3334,6 +3386,17 @@ edit, such as through a non-md-ts indirect buffer.")
   (with-current-buffer (md-ts--font-lock-state-buffer)
     (setq md-ts--font-lock-side-effect-modified-tick tick)))
 
+(defun md-ts--font-lock-side-effect-owner-in-buffer-family-p ()
+  "Return non-nil when any live md-ts owner shares current buffer text."
+  (let ((root (or (buffer-base-buffer) (current-buffer))))
+    (seq-some
+     (lambda (buffer)
+       (with-current-buffer buffer
+         (and (eq (or (buffer-base-buffer) (current-buffer)) root)
+              (boundp 'md-ts--side-effect-properties-owner)
+              md-ts--side-effect-properties-owner)))
+     (buffer-list))))
+
 (defun md-ts--font-lock-push-full-dirty-side-effect-bounds ()
   "Mark the whole shared buffer as needing side-effect cleanup."
   (with-current-buffer (md-ts--font-lock-state-buffer)
@@ -3341,6 +3404,15 @@ edit, such as through a non-md-ts indirect buffer.")
       (widen)
       (md-ts--font-lock-push-dirty-side-effect-bounds
        (point-min) (point-max)))))
+
+(defun md-ts--font-lock-clear-side-effect-state ()
+  "Clear shared font-lock side-effect dirty state for this buffer family."
+  (dolist (range (append (md-ts--font-lock-stale-side-effect-bounds)
+                         (md-ts--font-lock-dirty-side-effect-bounds)))
+    (md-ts--font-lock-clear-marker-range range))
+  (md-ts--font-lock-set-stale-side-effect-bounds nil)
+  (md-ts--font-lock-set-dirty-side-effect-bounds nil)
+  (md-ts--font-lock-set-side-effect-modified-tick nil))
 
 (defun md-ts--font-lock-initialize-side-effect-modified-tick ()
   "Initialize the shared side-effect modified tick when absent."
@@ -3354,7 +3426,8 @@ Return non-nil when a modified-tick mismatch was found."
   (let ((old-tick (md-ts--font-lock-side-effect-modified-tick))
         (new-tick (buffer-chars-modified-tick)))
     (unless (equal old-tick new-tick)
-      (when old-tick
+      (when (or old-tick
+                (md-ts--font-lock-side-effect-owner-in-buffer-family-p))
         (md-ts--font-lock-push-full-dirty-side-effect-bounds))
       (md-ts--font-lock-set-side-effect-modified-tick new-tick)
       t)))
@@ -3978,6 +4051,7 @@ changed."
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
       (when (md-ts--side-effect-properties-owner-backfillable-p)
+        (md-ts--migrate-legacy-display-properties (point-min) (point-max))
         (setq-local md-ts--side-effect-properties-owner t)
         (md-ts--install-side-effect-properties-teardown-hooks)))))
 
@@ -3998,7 +4072,8 @@ changed."
   (when (md-ts--side-effect-properties-owner-p)
     (unwind-protect
         (unless (md-ts--other-md-ts-buffer-sharing-text-p)
-          (md-ts--cleanup-whole-buffer-side-effect-properties))
+          (md-ts--cleanup-whole-buffer-side-effect-properties)
+          (md-ts--font-lock-clear-side-effect-state))
       (setq md-ts--side-effect-properties-owner nil))))
 
 (defun md-ts--setup-clean-side-effect-properties ()
@@ -4008,9 +4083,9 @@ setup-time whole-buffer sweep there would strip the base buffer's
 current UI before regional refontification can recreate it.  Normal
 buffers still clean old md-ts properties when the mode starts."
   (unless (buffer-base-buffer)
+    (md-ts--migrate-legacy-display-properties (point-min) (point-max))
     (md-ts--cleanup-whole-buffer-side-effect-properties)
-    (md-ts--font-lock-set-stale-side-effect-bounds nil)
-    (md-ts--font-lock-set-dirty-side-effect-bounds nil)
+    (md-ts--font-lock-clear-side-effect-state)
     (md-ts--font-lock-set-side-effect-modified-tick
      (buffer-chars-modified-tick))))
 

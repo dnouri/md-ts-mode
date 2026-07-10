@@ -86,6 +86,40 @@ set_resolve_error() {
   return 1
 }
 
+resolve_shell_bin() {
+  local candidate=""
+  local resolved=""
+  local dir=""
+  local base=""
+  local abs_dir=""
+
+  candidate=$(command -v sh 2>/dev/null || true)
+  case "$candidate" in
+    /*)
+      resolved=$candidate
+      ;;
+    */*)
+      if resolved=$(realpath "$candidate" 2>/dev/null); then
+        :
+      else
+        dir=${candidate%/*}
+        base=${candidate##*/}
+        if abs_dir=$(cd "$dir" 2>/dev/null && pwd -P); then
+          resolved=$abs_dir/$base
+        fi
+      fi
+      ;;
+  esac
+
+  if [ -z "$resolved" ] || [ ! -x "$resolved" ]; then
+    resolved=/bin/sh
+  fi
+  if [ ! -x "$resolved" ]; then
+    return 1
+  fi
+  printf '%s\n' "$resolved"
+}
+
 record_env_executable() {
   local env_word=$1
   local resolved=""
@@ -122,7 +156,7 @@ resolve_bare_executable() {
   local sh_bin=""
 
   if [ "${#detector_env[@]}" -gt 0 ]; then
-    sh_bin=$(command -v sh 2>/dev/null || true)
+    sh_bin=$(resolve_shell_bin || true)
     if [ -z "$sh_bin" ] || [ -z "$detector_env_exe" ]; then
       return 1
     fi
@@ -148,7 +182,7 @@ emacs_exe_is_executable() {
   fi
 
   if [ "${#detector_env[@]}" -gt 0 ]; then
-    sh_bin=$(command -v sh 2>/dev/null || true)
+    sh_bin=$(resolve_shell_bin || true)
     if [ -z "$sh_bin" ] || [ -z "$detector_env_exe" ]; then
       return 1
     fi
@@ -280,24 +314,86 @@ run_detector() {
 }
 
 detector_error=""
+detector_not_applicable_reason=""
+detector_skip_reason=""
+
+summarize_detector_text() {
+  printf '%s' "$1" | tr '\n' ' ' | sed 's/[[:space:]][[:space:]]*/ /g; s/^ //; s/ $//'
+}
+
+append_detector_skip_reason() {
+  local reason=$1
+  if [ -z "$detector_skip_reason" ]; then
+    detector_skip_reason=$reason
+  else
+    detector_skip_reason="$detector_skip_reason; $reason"
+  fi
+}
+
+detector_not_applicable_p() {
+  local detector_label=$1
+  local text=$2
+
+  case "$detector_label" in
+    ldd)
+      case "$text" in
+        *"not a dynamic executable"*|*"statically linked"*|*"not regular file"*)
+          return 0
+          ;;
+      esac
+      ;;
+    "otool -L")
+      case "$text" in
+        *"not an object file"*|*"not a Mach-O"*|*"can't open file"*)
+          return 0
+          ;;
+      esac
+      ;;
+  esac
+  return 1
+}
 
 run_detector_checked() {
   local detector_label=$1
+  local output_var=$2
   local output=""
+  local stderr_file=""
+  local stderr_text=""
+  local combined=""
+  local summary=""
   local status=0
-  shift
+  shift 2
 
+  stderr_file=$(mktemp)
   set +e
-  output=$(run_detector "$@" 2>/dev/null)
+  output=$(run_detector "$@" 2>"$stderr_file")
   status=$?
   set -e
+  stderr_text=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+  combined=$output
+  if [ -n "$stderr_text" ]; then
+    if [ -n "$combined" ]; then
+      combined="$combined
+$stderr_text"
+    else
+      combined=$stderr_text
+    fi
+  fi
+  summary=$(summarize_detector_text "$combined")
 
   if [ "$status" -ne 0 ]; then
-    detector_error="$detector_label failed with exit status $status"
+    if detector_not_applicable_p "$detector_label" "$combined"; then
+      detector_not_applicable_reason="$detector_label not applicable (exit status $status${summary:+: $summary})"
+      printf -v "$output_var" '%s' ""
+      return 2
+    fi
+    detector_error="$detector_label failed with exit status $status${summary:+: $summary}"
+    printf -v "$output_var" '%s' ""
     return 1
   fi
 
-  printf '%s\n' "$output"
+  printf -v "$output_var" '%s' "$output"
 }
 
 validate_detector_env_replay() {
@@ -312,14 +408,11 @@ validate_detector_env_replay() {
     return 1
   fi
 
-  sh_bin=$(command -v sh 2>/dev/null || true)
-  case "$sh_bin" in
-    */*) ;;
-    *)
-      set_resolve_error "could not resolve shell for env wrapper replay validation"
-      return 1
-      ;;
-  esac
+  sh_bin=$(resolve_shell_bin || true)
+  if [ -z "$sh_bin" ]; then
+    set_resolve_error "could not resolve shell for env wrapper replay validation"
+    return 1
+  fi
 
   if ! "$detector_env_exe" "${detector_env[@]}" "$sh_bin" -c : >/dev/null 2>&1; then
     set_resolve_error "could not replay env wrapper for runtime detector"
@@ -376,35 +469,49 @@ fi
 if [ "$emacs_exe_executable" = true ]; then
   if ldd_bin=$(command -v ldd 2>/dev/null); then
     detector_name="ldd"
-    if ! detector_output=$(run_detector_checked "$detector_name" \
-                           "$ldd_bin" "$emacs_exe"); then
-      report_detector_error
-      exit 2
+    detector_output=""
+    if run_detector_checked "$detector_name" detector_output \
+        "$ldd_bin" "$emacs_exe"; then
+      lib_path=$(
+        printf '%s\n' "$detector_output" \
+          | awk '/libtree-sitter/ {
+              for (i = 1; i < NF; i++) {
+                if ($i == "=>" && $(i + 1) != "not") { print $(i + 1); exit }
+              }
+              for (i = 1; i <= NF; i++) {
+                if ($i ~ /libtree-sitter/ && $i != "=>") { print $i; exit }
+              }
+            }'
+      )
+    else
+      detector_status=$?
+      if [ "$detector_status" -eq 2 ]; then
+        append_detector_skip_reason "$detector_not_applicable_reason"
+      else
+        report_detector_error
+        exit 2
+      fi
     fi
-    lib_path=$(
-      printf '%s\n' "$detector_output" \
-        | awk '/libtree-sitter/ {
-            for (i = 1; i < NF; i++) {
-              if ($i == "=>" && $(i + 1) != "not") { print $(i + 1); exit }
-            }
-            for (i = 1; i <= NF; i++) {
-              if ($i ~ /libtree-sitter/ && $i != "=>") { print $i; exit }
-            }
-          }'
-    )
   fi
 
   if [ -z "$lib_path" ] && otool_bin=$(command -v otool 2>/dev/null); then
     detector_name="otool -L"
-    if ! detector_output=$(run_detector_checked "$detector_name" \
-                           "$otool_bin" -L "$emacs_exe"); then
-      report_detector_error
-      exit 2
+    detector_output=""
+    if run_detector_checked "$detector_name" detector_output \
+        "$otool_bin" -L "$emacs_exe"; then
+      lib_path=$(
+        printf '%s\n' "$detector_output" \
+          | awk '/libtree-sitter/ { print $1; exit }'
+      )
+    else
+      detector_status=$?
+      if [ "$detector_status" -eq 2 ]; then
+        append_detector_skip_reason "$detector_not_applicable_reason"
+      else
+        report_detector_error
+        exit 2
+      fi
     fi
-    lib_path=$(
-      printf '%s\n' "$detector_output" \
-        | awk '/libtree-sitter/ { print $1; exit }'
-    )
   fi
 fi
 
@@ -446,7 +553,11 @@ if [ "$emacs_exe_executable" != true ]; then
 fi
 
 if [ -z "$lib_path" ]; then
-  skip_detection "no ldd/otool -L libtree-sitter dependency was detected"
+  if [ -n "$detector_skip_reason" ]; then
+    skip_detection "no usable ldd/otool -L libtree-sitter dependency was detected ($detector_skip_reason)"
+  else
+    skip_detection "no ldd/otool -L libtree-sitter dependency was detected"
+  fi
   exit 0
 fi
 

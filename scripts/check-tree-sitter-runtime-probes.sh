@@ -7,12 +7,42 @@ check_script=$PWD/scripts/check-tree-sitter-runtime.sh
 probe_dir=$(mktemp -d)
 trap 'rm -rf "$probe_dir"' EXIT
 
-sh_bin=$(command -v sh 2>/dev/null || true)
-case "$sh_bin" in
-  */*) ;;
-  *) sh_bin=/bin/sh ;;
-esac
-if [ ! -x "$sh_bin" ]; then
+resolve_probe_shell() {
+  local candidate=""
+  local resolved=""
+  local dir=""
+  local base=""
+  local abs_dir=""
+
+  candidate=$(command -v sh 2>/dev/null || true)
+  case "$candidate" in
+    /*)
+      resolved=$candidate
+      ;;
+    */*)
+      if resolved=$(realpath "$candidate" 2>/dev/null); then
+        :
+      else
+        dir=${candidate%/*}
+        base=${candidate##*/}
+        if abs_dir=$(cd "$dir" 2>/dev/null && pwd -P); then
+          resolved=$abs_dir/$base
+        fi
+      fi
+      ;;
+  esac
+
+  if [ -z "$resolved" ] || [ ! -x "$resolved" ]; then
+    resolved=/bin/sh
+  fi
+  if [ ! -x "$resolved" ]; then
+    return 1
+  fi
+  printf '%s\n' "$resolved"
+}
+
+sh_bin=$(resolve_probe_shell || true)
+if [ -z "$sh_bin" ]; then
   printf 'FAIL: could not find an executable sh for probes\n' >&2
   exit 1
 fi
@@ -97,6 +127,24 @@ exit 127
 EOF
 chmod +x "$detector_fail_bin/ldd"
 
+not_dynamic_bin=$probe_dir/not-dynamic-bin
+mkdir -p "$not_dynamic_bin"
+cp "$fake_bin/emacs" "$not_dynamic_bin/emacs"
+cat >"$not_dynamic_bin/ldd" <<EOF
+#!$sh_bin
+printf 'not a dynamic executable\n' >&2
+exit 1
+EOF
+chmod +x "$not_dynamic_bin/ldd"
+
+relative_shell_cwd=$probe_dir/relative-shell-cwd
+relative_shell_bin=$relative_shell_cwd/rel-sh-bin
+mkdir -p "$relative_shell_bin"
+if ! ln -s "$sh_bin" "$relative_shell_bin/sh" 2>/dev/null; then
+  cp "$sh_bin" "$relative_shell_bin/sh"
+  chmod +x "$relative_shell_bin/sh"
+fi
+
 run_probe() {
   local name=$1
   local expected=$2
@@ -133,6 +181,16 @@ run_probe() {
       fi
       if ! grep -q 'tree-sitter runtime check skipped by' <<<"$output"; then
         printf 'FAIL %s: explicit skip message missing\n%s\n' "$name" "$output" >&2
+        exit 1
+      fi
+      ;;
+    detect-skip)
+      if [ "$status" -ne 0 ]; then
+        printf 'FAIL %s: expected zero status\n%s\n' "$name" "$output" >&2
+        exit 1
+      fi
+      if ! grep -q 'tree-sitter runtime check skipped' <<<"$output"; then
+        printf 'FAIL %s: detector skip message missing\n%s\n' "$name" "$output" >&2
         exit 1
       fi
       ;;
@@ -182,6 +240,12 @@ run_probe "env -- PATH wrapper fails unsupported runtime" fail \
 if [ "$env_supports_chdir" = true ]; then
   run_probe "env -C wrapper fails unsupported runtime" fail \
     env PATH="$probe_path" EMACS="env -C $chdir_dir emacs" "$check_script"
+
+  run_probe "env -C wrapper ignores relative sh from PATH" fail \
+    "$sh_bin" -c 'cd "$1" || exit 1; shift; exec "$@"' sh \
+      "$relative_shell_cwd" \
+      env PATH="rel-sh-bin:$probe_path" \
+      EMACS="env -C $chdir_dir emacs" "$check_script"
 else
   printf 'ok - env -C wrapper probes skipped (env lacks -C)\n'
 fi
@@ -207,6 +271,9 @@ if [ -n "$env_bin" ]; then
       EMACS="$env_bin -- PATH=$detector_fail_bin emacs" \
       "$check_script"
 fi
+
+run_probe "not-dynamic ldd result skips detection" detect-skip \
+  env PATH="$not_dynamic_bin:$PATH" EMACS=emacs "$check_script"
 
 run_probe "SKIP_RUNTIME_CHECK explicitly skips" skip \
   env PATH="$probe_path" EMACS="env -- PATH=$probe_path emacs" \
