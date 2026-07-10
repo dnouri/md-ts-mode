@@ -3951,27 +3951,35 @@ derived modes and indirect buffers are counted consistently."
   (with-current-buffer (or buffer (current-buffer))
     md-ts--side-effect-properties-owner))
 
-(defun md-ts--legacy-side-effect-properties-owner-p ()
-  "Return non-nil for a pre-owner md-ts current buffer."
+(defun md-ts--side-effect-properties-owner-backfillable-p ()
+  "Return non-nil when the current buffer needs ownership backfill.
+A live reloaded buffer may already be in `md-ts-mode' or a derived
+mode, with md-ts text properties, before the buffer-local owner flag
+and teardown hooks existed.  A local owner flag is authoritative,
+including an explicit nil left by teardown."
   (and (not (local-variable-p 'md-ts--side-effect-properties-owner
                               (current-buffer)))
-       (derived-mode-p 'md-ts-mode)
-       (or (memq #'md-ts--teardown-side-effect-properties
-                 change-major-mode-hook)
-           (memq #'md-ts--teardown-side-effect-properties
-                 kill-buffer-hook))))
+       (derived-mode-p 'md-ts-mode)))
+
+(defun md-ts--install-side-effect-properties-teardown-hooks ()
+  "Install buffer-local teardown hooks for md-ts side effects."
+  (add-hook 'change-major-mode-hook
+            #'md-ts--teardown-side-effect-properties nil t)
+  (add-hook 'kill-buffer-hook
+            #'md-ts--teardown-side-effect-properties nil t))
 
 (defun md-ts--backfill-side-effect-properties-ownership ()
   "Mark live pre-owner md-ts buffers as side-effect property owners.
 This supports live reloading `md-ts-mode.el': buffers set up by an
-older definition have md-ts cleanup hooks and text properties, but
-lack the local owner flag introduced later.  Buffers that already
-have a local owner flag, including an explicit nil left by teardown,
-are not changed."
+older definition may have md-ts text properties, but lack the local
+owner flag introduced later.  Buffers that already have a local
+owner flag, including an explicit nil left by teardown, are not
+changed."
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
-      (when (md-ts--legacy-side-effect-properties-owner-p)
-        (setq-local md-ts--side-effect-properties-owner t)))))
+      (when (md-ts--side-effect-properties-owner-backfillable-p)
+        (setq-local md-ts--side-effect-properties-owner t)
+        (md-ts--install-side-effect-properties-teardown-hooks)))))
 
 (defun md-ts--other-md-ts-buffer-sharing-text-p ()
   "Return non-nil when another live md-ts owner shares text."
@@ -4034,10 +4042,7 @@ buffers still clean old md-ts properties when the mode starts."
             #'md-ts--font-lock-record-dirty-side-effect-bounds nil t)
   (add-hook 'after-change-functions
             #'md-ts--after-change-flush-link-reference-links nil t)
-  (add-hook 'change-major-mode-hook
-            #'md-ts--teardown-side-effect-properties nil t)
-  (add-hook 'kill-buffer-hook
-            #'md-ts--teardown-side-effect-properties nil t)
+  (md-ts--install-side-effect-properties-teardown-hooks)
 
   (when (treesit-ready-p 'html t)
     (md-ts--parser-create 'html)

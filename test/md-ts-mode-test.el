@@ -4422,6 +4422,49 @@ inline parser ranges cause the first range's faces to be dropped."
           (should-not (button-at parsed-pos)))
       (kill-buffer buf))))
 
+(ert-deftest md-ts-test-live-reload-backfills-hookless-cleanup-owner ()
+  "Live reload should backfill hookless md-ts buffers and cleanup hooks."
+  (let ((buf (generate-new-buffer " *md-ts-test-live-reload-hookless*"))
+        parsed-pos)
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "See [Doc](https://example.com/doc) now.\n")
+          (md-ts-test-derived-mode)
+          (font-lock-ensure)
+          (goto-char (point-min))
+          (search-forward "Doc")
+          (setq parsed-pos (match-beginning 0))
+          (should (md-ts--link-button-p (button-at parsed-pos)))
+          (remove-hook 'change-major-mode-hook
+                       #'md-ts--teardown-side-effect-properties t)
+          (remove-hook 'kill-buffer-hook
+                       #'md-ts--teardown-side-effect-properties t)
+          (kill-local-variable 'md-ts--side-effect-properties-owner)
+          (should (derived-mode-p 'md-ts-mode))
+          (should-not (local-variable-p 'md-ts--side-effect-properties-owner
+                                        (current-buffer)))
+          (should-not (memq #'md-ts--teardown-side-effect-properties
+                            change-major-mode-hook))
+          (should-not (memq #'md-ts--teardown-side-effect-properties
+                            kill-buffer-hook))
+          (md-ts--backfill-side-effect-properties-ownership)
+          (should (md-ts--side-effect-properties-owner-p))
+          (should (memq #'md-ts--teardown-side-effect-properties
+                        change-major-mode-hook))
+          (should (memq #'md-ts--teardown-side-effect-properties
+                        kill-buffer-hook))
+          (md-ts--backfill-side-effect-properties-ownership)
+          (should (= (cl-count #'md-ts--teardown-side-effect-properties
+                               change-major-mode-hook)
+                     1))
+          (should (= (cl-count #'md-ts--teardown-side-effect-properties
+                               kill-buffer-hook)
+                     1))
+          (fundamental-mode)
+          (should (eq major-mode 'fundamental-mode))
+          (should-not (button-at parsed-pos)))
+      (kill-buffer buf))))
+
 (ert-deftest md-ts-test-mode-exit-derived-cleans-link-buttons ()
   "Leaving a mode derived from `md-ts-mode' should clean link props."
   (let ((buf (generate-new-buffer " *md-ts-test-derived-exit*"))

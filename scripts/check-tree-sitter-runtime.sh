@@ -279,8 +279,29 @@ run_detector() {
   fi
 }
 
+detector_error=""
+
+run_detector_checked() {
+  local detector_label=$1
+  local output=""
+  local status=0
+  shift
+
+  set +e
+  output=$(run_detector "$@" 2>/dev/null)
+  status=$?
+  set -e
+
+  if [ "$status" -ne 0 ]; then
+    detector_error="$detector_label failed with exit status $status"
+    return 1
+  fi
+
+  printf '%s\n' "$output"
+}
+
 validate_detector_env_replay() {
-  local true_bin=""
+  local sh_bin=""
 
   if [ "${#detector_env[@]}" -eq 0 ]; then
     return 0
@@ -291,13 +312,16 @@ validate_detector_env_replay() {
     return 1
   fi
 
-  true_bin=$(command -v true 2>/dev/null || true)
-  if [ -z "$true_bin" ]; then
-    set_resolve_error "could not resolve true for env wrapper replay validation"
-    return 1
-  fi
+  sh_bin=$(command -v sh 2>/dev/null || true)
+  case "$sh_bin" in
+    */*) ;;
+    *)
+      set_resolve_error "could not resolve shell for env wrapper replay validation"
+      return 1
+      ;;
+  esac
 
-  if ! "$detector_env_exe" "${detector_env[@]}" "$true_bin" >/dev/null 2>&1; then
+  if ! "$detector_env_exe" "${detector_env[@]}" "$sh_bin" -c : >/dev/null 2>&1; then
     set_resolve_error "could not replay env wrapper for runtime detector"
     return 1
   fi
@@ -312,6 +336,20 @@ md-ts-mode tests: could not safely resolve Emacs executable
 This preflight refuses to inspect a guessed binary when an EMACS env
 wrapper cannot be parsed, resolved, or replayed.  To bypass it explicitly,
 set SKIP_RUNTIME_CHECK=1 (or MD_TS_SKIP_RUNTIME_CHECK=1).
+EOF
+}
+
+report_detector_error() {
+  cat >&2 <<EOF
+md-ts-mode tests: runtime detector failed
+  Emacs command: $emacs_label (major $major)
+  Emacs executable: ${emacs_exe:-unknown}
+  Detector: $detector_name
+  Reason: $detector_error
+
+This preflight refuses to skip runtime detection after a detector replay or
+execution failure.  To bypass it explicitly, set SKIP_RUNTIME_CHECK=1
+(or MD_TS_SKIP_RUNTIME_CHECK=1).
 EOF
 }
 
@@ -338,8 +376,13 @@ fi
 if [ "$emacs_exe_executable" = true ]; then
   if ldd_bin=$(command -v ldd 2>/dev/null); then
     detector_name="ldd"
+    if ! detector_output=$(run_detector_checked "$detector_name" \
+                           "$ldd_bin" "$emacs_exe"); then
+      report_detector_error
+      exit 2
+    fi
     lib_path=$(
-      { run_detector "$ldd_bin" "$emacs_exe" 2>/dev/null || true; } \
+      printf '%s\n' "$detector_output" \
         | awk '/libtree-sitter/ {
             for (i = 1; i < NF; i++) {
               if ($i == "=>" && $(i + 1) != "not") { print $(i + 1); exit }
@@ -353,8 +396,13 @@ if [ "$emacs_exe_executable" = true ]; then
 
   if [ -z "$lib_path" ] && otool_bin=$(command -v otool 2>/dev/null); then
     detector_name="otool -L"
+    if ! detector_output=$(run_detector_checked "$detector_name" \
+                           "$otool_bin" -L "$emacs_exe"); then
+      report_detector_error
+      exit 2
+    fi
     lib_path=$(
-      { run_detector "$otool_bin" -L "$emacs_exe" 2>/dev/null || true; } \
+      printf '%s\n' "$detector_output" \
         | awk '/libtree-sitter/ { print $1; exit }'
     )
   fi
