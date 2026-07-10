@@ -2450,10 +2450,11 @@ left intact."
 (defun md-ts--migrate-legacy-display-properties (beg end)
   "Tag legacy md-ts `display' properties from BEG to END with ownership.
 
-Older live-reloaded buffers can have task-list and thematic-break
-`display' properties created before `md-ts-display' existed.  Only
-syntax-shaped legacy displays are tagged, so ordinary foreign
-`display' properties keep blocking md-ts ownership."
+Older live-reloaded md-ts buffers can have task-list and
+thematic-break `display' properties created before `md-ts-display'
+existed.  Use this only during live-reload backfill, where the
+buffer's pre-existing md-ts mode is evidence for legacy ownership;
+fresh setup cannot distinguish shape-colliding foreign displays."
   (with-silent-modifications
     (let ((inhibit-read-only t))
       (save-restriction
@@ -4081,9 +4082,9 @@ changed."
 Indirect buffers share text properties with their base buffer, so a
 setup-time whole-buffer sweep there would strip the base buffer's
 current UI before regional refontification can recreate it.  Normal
-buffers still clean old md-ts properties when the mode starts."
+buffers still clean old md-ts-owned properties when the mode starts;
+fresh setup deliberately does not infer ownership from display shape."
   (unless (buffer-base-buffer)
-    (md-ts--migrate-legacy-display-properties (point-min) (point-max))
     (md-ts--cleanup-whole-buffer-side-effect-properties)
     (md-ts--font-lock-clear-side-effect-state)
     (md-ts--font-lock-set-side-effect-modified-tick

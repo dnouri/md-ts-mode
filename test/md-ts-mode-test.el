@@ -898,6 +898,36 @@ not a delimiter that should be hidden."
             (should-not (get-text-property marker-beg 'md-ts-display))))
       (kill-buffer buf))))
 
+(ert-deftest md-ts-test-mode-setup-exit-preserves-shape-colliding-foreign-display ()
+  "Fresh setup and mode exit should preserve shape-colliding foreign display."
+  (let ((buf (generate-new-buffer " *md-ts-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "- [ ] todo\n\n---\n")
+          (goto-char (point-min))
+          (search-forward "[ ]")
+          (let ((task-beg (match-beginning 0))
+                (task-end (match-end 0))
+                rule-beg rule-end)
+            (search-forward "---")
+            (setq rule-beg (match-beginning 0)
+                  rule-end (match-end 0))
+            (put-text-property task-beg task-end 'display "☐")
+            (put-text-property rule-beg rule-end 'display "───")
+            (md-ts-mode)
+            (font-lock-ensure)
+            (should (equal (get-text-property task-beg 'display) "☐"))
+            (should-not (get-text-property task-beg 'md-ts-display))
+            (should (equal (get-text-property rule-beg 'display) "───"))
+            (should-not (get-text-property rule-beg 'md-ts-display))
+            (fundamental-mode)
+            (should (eq major-mode 'fundamental-mode))
+            (should (equal (get-text-property task-beg 'display) "☐"))
+            (should-not (get-text-property task-beg 'md-ts-display))
+            (should (equal (get-text-property rule-beg 'display) "───"))
+            (should-not (get-text-property rule-beg 'md-ts-display))))
+      (kill-buffer buf))))
+
 (ert-deftest md-ts-test-display-cleanup-preserves-replaced-foreign-display ()
   "Cleanup should not remove a foreign display replacing an md-ts display."
   (let ((buf (md-ts-test--fontify "---\n")))
