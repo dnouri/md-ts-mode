@@ -28,6 +28,9 @@
 
 (declare-function md-ts--refresh-local-parsers "md-ts-mode" (&optional beg end))
 
+(define-derived-mode md-ts-test-derived-mode md-ts-mode "MdTsTest"
+  "Test mode derived from `md-ts-mode'.")
+
 ;;; Test helpers
 
 (defun md-ts-test--fontify (text)
@@ -4393,6 +4396,36 @@ inline parser ranges cause the first range's faces to be dropped."
                          'md-ts--markup))))
       (kill-buffer buf))))
 
+(ert-deftest md-ts-test-mode-exit-derived-cleans-link-buttons ()
+  "Leaving a mode derived from `md-ts-mode' should clean link props."
+  (let ((buf (generate-new-buffer " *md-ts-test-derived-exit*"))
+        parsed-pos bare-pos)
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "See [Doc](https://example.com/doc) and https://example.com/path.\n")
+          (md-ts-test-derived-mode)
+          (font-lock-ensure)
+          (goto-char (point-min))
+          (search-forward "Doc")
+          (setq parsed-pos (match-beginning 0))
+          (search-forward "https://example.com/path")
+          (setq bare-pos (match-beginning 0))
+          (should (eq major-mode 'md-ts-test-derived-mode))
+          (should (derived-mode-p 'md-ts-mode))
+          (should (md-ts--link-button-p (button-at parsed-pos)))
+          (should (md-ts--link-button-p (button-at bare-pos)))
+          (fundamental-mode)
+          (should (eq major-mode 'fundamental-mode))
+          (should-not (button-at parsed-pos))
+          (should-not (button-at bare-pos))
+          (dolist (pos (list parsed-pos bare-pos))
+            (dolist (prop '(button category action help-echo mouse-face
+                                   follow-link md-ts-link-button
+                                   md-ts-link-help-echo
+                                   md-ts-link-static-target))
+              (should-not (get-text-property pos prop)))))
+      (kill-buffer buf))))
+
 (ert-deftest md-ts-test-mode-exit-indirect-preserves-base-link-buttons ()
   "Indirect mode exit must not strip valid base-buffer link buttons."
   (let ((base (md-ts-test--fontify
@@ -4444,6 +4477,45 @@ inline parser ranges cause the first range's faces to be dropped."
           (setq indirect (make-indirect-buffer base " *md-ts-indirect*" t))
           (with-current-buffer indirect
             (md-ts-mode))
+          (with-current-buffer base
+            (fundamental-mode)
+            (should (eq major-mode 'fundamental-mode))
+            (should (md-ts--link-button-p (button-at parsed-pos)))
+            (should (md-ts--link-button-p (button-at bare-pos))))
+          (kill-buffer indirect)
+          (setq indirect nil)
+          (with-current-buffer base
+            (should-not (button-at parsed-pos))
+            (should-not (button-at bare-pos))
+            (dolist (pos (list parsed-pos bare-pos))
+              (dolist (prop '(button category action help-echo
+                                     md-ts-link-button
+                                     md-ts-link-help-echo
+                                     md-ts-link-static-target))
+                (should-not (get-text-property pos prop))))))
+      (when (buffer-live-p indirect)
+        (kill-buffer indirect))
+      (kill-buffer base))))
+
+(ert-deftest md-ts-test-mode-exit-base-keeps-derived-indirect-owner ()
+  "Base mode exit should preserve props for a derived indirect owner."
+  (let ((base (md-ts-test--fontify
+               "See [Doc](https://example.com/doc) and https://example.com/path.\n"))
+        indirect parsed-pos bare-pos)
+    (unwind-protect
+        (progn
+          (with-current-buffer base
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (setq parsed-pos (match-beginning 0))
+            (search-forward "https://example.com/path")
+            (setq bare-pos (match-beginning 0))
+            (should (md-ts--link-button-p (button-at parsed-pos)))
+            (should (md-ts--link-button-p (button-at bare-pos))))
+          (setq indirect (make-indirect-buffer base " *md-ts-derived-indirect*" t))
+          (with-current-buffer indirect
+            (md-ts-test-derived-mode)
+            (should (derived-mode-p 'md-ts-mode)))
           (with-current-buffer base
             (fundamental-mode)
             (should (eq major-mode 'fundamental-mode))

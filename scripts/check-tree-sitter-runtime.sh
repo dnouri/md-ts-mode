@@ -78,6 +78,12 @@ fi
 
 detector_env=()
 emacs_exe=""
+resolve_error=""
+
+set_resolve_error() {
+  resolve_error=$1
+  return 1
+}
 
 resolve_bare_executable() {
   local exe=$1
@@ -103,45 +109,98 @@ resolve_bare_executable() {
   return 1
 }
 
+emacs_exe_is_executable() {
+  local sh_bin=""
+
+  if [ -z "$emacs_exe" ]; then
+    return 1
+  fi
+
+  if [ "${#detector_env[@]}" -gt 0 ]; then
+    sh_bin=$(command -v sh 2>/dev/null || true)
+    if [ -z "$sh_bin" ]; then
+      return 1
+    fi
+    env "${detector_env[@]}" "$sh_bin" -c \
+      'test -x "$1"' sh "$emacs_exe" >/dev/null 2>&1
+  else
+    [ -x "$emacs_exe" ]
+  fi
+}
+
+consume_env_option_arg() {
+  local option=$1
+  local index=$2
+
+  if [ $((index + 1)) -ge "${#words[@]}" ]; then
+    set_resolve_error "env option $option requires an argument"
+    return 1
+  fi
+
+  detector_env+=("$option" "${words[$((index + 1))]}")
+  return 0
+}
+
 resolve_emacs_executable() {
   local -a words=("${emacs_argv[@]}")
   local i=0
   local word
+  local parsing_options
+  local saw_env=false
 
   while [ "$i" -lt "${#words[@]}" ]; do
     word=${words[$i]}
     case "$word" in
       env|*/env)
+        saw_env=true
         i=$((i + 1))
+        parsing_options=true
         while [ "$i" -lt "${#words[@]}" ]; do
           word=${words[$i]}
-          case "$word" in
-            -i|--ignore-environment|-0|--null)
-              detector_env+=("$word")
-              i=$((i + 1))
-              ;;
-            -u|--unset)
-              if [ $((i + 1)) -lt "${#words[@]}" ]; then
-                detector_env+=("$word" "${words[$((i + 1))]}")
+          if [ "$parsing_options" = true ]; then
+            case "$word" in
+              --)
+                parsing_options=false
+                i=$((i + 1))
+                continue
+                ;;
+              -i|--ignore-environment|-0|--null)
+                detector_env+=("$word")
+                i=$((i + 1))
+                continue
+                ;;
+              -u|--unset|--chdir|-C)
+                consume_env_option_arg "$word" "$i" || return 1
                 i=$((i + 2))
-              else
+                continue
+                ;;
+              -u?*)
+                detector_env+=("-u" "${word#-u}")
+                i=$((i + 1))
+                continue
+                ;;
+              -C?*)
+                detector_env+=("-C" "${word#-C}")
+                i=$((i + 1))
+                continue
+                ;;
+              --unset=*|--chdir=*)
+                detector_env+=("$word")
+                i=$((i + 1))
+                continue
+                ;;
+              --*)
+                set_resolve_error "unsupported env option in EMACS: $word"
                 return 1
-              fi
-              ;;
-            --unset=*)
-              detector_env+=("$word")
-              i=$((i + 1))
-              ;;
-            --)
-              i=$((i + 1))
-              break
-              ;;
-            --*)
-              return 1
-              ;;
-            -*)
-              return 1
-              ;;
+                ;;
+              -*)
+                set_resolve_error "unsupported env option in EMACS: $word"
+                return 1
+                ;;
+            esac
+          fi
+
+          case "$word" in
             *=*)
               detector_env+=("$word")
               i=$((i + 1))
@@ -151,6 +210,10 @@ resolve_emacs_executable() {
               ;;
           esac
         done
+        if [ "$i" -ge "${#words[@]}" ]; then
+          set_resolve_error "env wrapper did not include an Emacs command"
+          return 1
+        fi
         continue
         ;;
     esac
@@ -160,7 +223,12 @@ resolve_emacs_executable() {
         emacs_exe=$word
         ;;
       *)
-        resolve_bare_executable "$word" || return 1
+        if ! resolve_bare_executable "$word"; then
+          if [ "$saw_env" = true ]; then
+            set_resolve_error "could not resolve env-wrapped Emacs command: $word"
+          fi
+          return 1
+        fi
         ;;
     esac
     return 0
@@ -179,12 +247,30 @@ run_detector() {
   fi
 }
 
-resolve_emacs_executable || true
+if ! resolve_emacs_executable; then
+  if [ -n "$resolve_error" ]; then
+    cat >&2 <<EOF
+md-ts-mode tests: could not safely resolve Emacs executable
+  Emacs command: $emacs_label (major $major)
+  Reason: $resolve_error
+
+This preflight refuses to inspect a guessed binary when an EMACS env
+wrapper cannot be parsed or resolved.  To bypass it explicitly, set
+SKIP_RUNTIME_CHECK=1 (or MD_TS_SKIP_RUNTIME_CHECK=1).
+EOF
+    exit 2
+  fi
+fi
 
 lib_path=""
 detector_name=""
+emacs_exe_executable=false
 
-if [ -n "$emacs_exe" ] && [ -x "$emacs_exe" ]; then
+if emacs_exe_is_executable; then
+  emacs_exe_executable=true
+fi
+
+if [ "$emacs_exe_executable" = true ]; then
   if ldd_bin=$(command -v ldd 2>/dev/null); then
     detector_name="ldd"
     lib_path=$(
@@ -241,7 +327,7 @@ libtree-sitter runtime.  To bypass it explicitly, set SKIP_RUNTIME_CHECK=1
 EOF
 }
 
-if [ -z "$emacs_exe" ] || [ ! -x "$emacs_exe" ]; then
+if [ "$emacs_exe_executable" != true ]; then
   skip_detection "could not resolve a direct Emacs executable from EMACS"
   exit 0
 fi

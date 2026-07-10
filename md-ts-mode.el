@@ -3926,6 +3926,12 @@ when point is not on a supported link."
 
 ;;; Major mode
 
+(defvar-local md-ts--side-effect-properties-owner nil
+  "Non-nil when this buffer owns md-ts text-property side effects.
+The flag is set by `md-ts-setup' rather than inferred from
+`major-mode' so modes derived from `md-ts-mode' participate in
+mode-exit and `kill-buffer' cleanup.")
+
 (defun md-ts--cleanup-whole-buffer-side-effect-properties ()
   "Remove md-ts-owned whole-buffer text-property side effects."
   (with-silent-modifications
@@ -3937,8 +3943,16 @@ when point is not on a supported link."
         (md-ts--remove-bare-link-button-properties (point-min) (point-max))
         (md-ts--remove-link-button-properties (point-min) (point-max))))))
 
+(defun md-ts--side-effect-properties-owner-p (&optional buffer)
+  "Return non-nil when BUFFER owns md-ts side-effect properties.
+BUFFER defaults to the current buffer.  Ownership is intentionally
+buffer-local and independent of the exact `major-mode' symbol so
+derived modes and indirect buffers are counted consistently."
+  (with-current-buffer (or buffer (current-buffer))
+    md-ts--side-effect-properties-owner))
+
 (defun md-ts--other-md-ts-buffer-sharing-text-p ()
-  "Return non-nil when another live `md-ts-mode' buffer shares text."
+  "Return non-nil when another live md-ts owner shares text."
   (let ((current (current-buffer))
         (root (or (buffer-base-buffer) (current-buffer))))
     (seq-some
@@ -3946,14 +3960,16 @@ when point is not on a supported link."
        (and (not (eq buffer current))
             (with-current-buffer buffer
               (and (eq (or (buffer-base-buffer) (current-buffer)) root)
-                   (eq major-mode 'md-ts-mode)))))
+                   (md-ts--side-effect-properties-owner-p)))))
      (buffer-list))))
 
 (defun md-ts--teardown-side-effect-properties ()
-  "Clean md-ts-owned side effects before leaving or killing `md-ts-mode'."
-  (when (and (eq major-mode 'md-ts-mode)
-             (not (md-ts--other-md-ts-buffer-sharing-text-p)))
-    (md-ts--cleanup-whole-buffer-side-effect-properties)))
+  "Clean md-ts-owned side effects before leaving or killing an owner."
+  (when (md-ts--side-effect-properties-owner-p)
+    (unwind-protect
+        (unless (md-ts--other-md-ts-buffer-sharing-text-p)
+          (md-ts--cleanup-whole-buffer-side-effect-properties))
+      (setq md-ts--side-effect-properties-owner nil))))
 
 (defun md-ts--setup-clean-side-effect-properties ()
   "Clean md-ts-owned whole-buffer side effects for mode setup.
@@ -3971,6 +3987,7 @@ buffers still clean old md-ts properties when the mode starts."
 (defun md-ts-setup ()
   "Setup treesit for `md-ts-mode'."
   (make-local-variable 'md-ts-hide-markup)
+  (setq-local md-ts--side-effect-properties-owner t)
   (setq-local treesit-font-lock-settings md-ts--treesit-settings)
   (setq-local treesit-range-settings (md-ts--range-settings))
   (setq-local font-lock-extra-managed-props

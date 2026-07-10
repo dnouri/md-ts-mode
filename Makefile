@@ -16,12 +16,13 @@ $(error PERF_ITERATIONS must be a positive integer)
 endif
 endif
 
-.PHONY: test check-runtime compile compile-tests compile-benchmark perf-smoke lint lint-checkdoc lint-package check check-parens clean help install-hooks snapshot perf
+.PHONY: test check-runtime runtime-probes compile compile-tests compile-benchmark perf-smoke lint lint-checkdoc lint-package check check-parens clean help install-hooks snapshot perf
 
 help:
 	@echo "Targets:"
 	@echo "  make test           Run ERT tests (SELECTOR=pattern, VERBOSE=1; SKIP_RUNTIME_CHECK=1 to bypass preflight)"
 	@echo "  make check-runtime  Verify supported Emacs/libtree-sitter runtime when detectable"
+	@echo "  make runtime-probes Verify runtime preflight env-wrapper handling"
 	@echo "  make compile        Byte-compile package with warnings-as-errors"
 	@echo "  make compile-tests  Byte-compile tests with warnings-as-errors"
 	@echo "  make compile-benchmark  Byte-compile benchmark tooling"
@@ -39,12 +40,13 @@ help:
 test: check-runtime compile
 	@echo "=== Tests ==="
 	@OUTPUT=$$(mktemp); \
+	MD_TS_TEST_SELECTOR="$(SELECTOR)" \
 	$(BATCH) \
 		--eval '(add-to-list (quote treesit-extra-load-path) (expand-file-name "~/.emacs.d/tree-sitter"))' \
 		-L test \
 		-l md-ts-mode-test \
 		--eval '(load (expand-file-name "test/md-ts-mode-ert-font-lock.el") nil t)' \
-		$(if $(SELECTOR),--eval '(ert-run-tests-batch-and-exit "$(SELECTOR)")',-f ert-run-tests-batch-and-exit) \
+		$(if $(SELECTOR),--eval '(ert-run-tests-batch-and-exit (getenv "MD_TS_TEST_SELECTOR"))',-f ert-run-tests-batch-and-exit) \
 		>$$OUTPUT 2>&1; \
 	STATUS=$$?; \
 	if [ "$(VERBOSE)" = "1" ] || [ $$STATUS -ne 0 ]; then \
@@ -57,6 +59,10 @@ test: check-runtime compile
 
 check-runtime:
 	@EMACS="$(EMACS)" ./scripts/check-tree-sitter-runtime.sh
+
+runtime-probes:
+	@echo "=== Runtime preflight probes ==="
+	@./scripts/check-tree-sitter-runtime-probes.sh
 
 compile:
 	@rm -f *.elc
@@ -143,7 +149,7 @@ perf-smoke: check-runtime
 		$(BATCH) \
 		-l scripts/benchmark-document-links.el
 
-check: check-runtime compile compile-tests compile-benchmark perf-smoke lint test
+check: check-runtime runtime-probes compile compile-tests compile-benchmark perf-smoke lint test
 
 install-hooks:
 	@git config core.hooksPath hooks
