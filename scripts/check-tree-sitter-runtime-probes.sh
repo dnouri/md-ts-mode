@@ -137,6 +137,85 @@ exit 1
 EOF
 chmod +x "$not_dynamic_bin/ldd"
 
+misleading_path_bin=$probe_dir/misleading-path-bin
+misleading_path_lib=$probe_dir/runtime-0.25-misleading/lib
+mkdir -p "$misleading_path_bin" "$misleading_path_lib"
+cp "$fake_bin/emacs" "$misleading_path_bin/emacs"
+: >"$misleading_path_lib/libtree-sitter.so.0.22"
+cat >"$misleading_path_bin/ldd" <<EOF
+#!$sh_bin
+printf '%s\n' '\tlibtree-sitter.so.0.22 => $misleading_path_lib/libtree-sitter.so.0.22 (0x00000000)'
+EOF
+chmod +x "$misleading_path_bin/ldd"
+
+supported_shim_bin=$probe_dir/supported-shim-bin
+supported_shim_lib=$probe_dir/custom-runtime/lib
+mkdir -p "$supported_shim_bin" "$supported_shim_lib"
+cp "$fake_bin/emacs" "$supported_shim_bin/emacs"
+: >"$supported_shim_lib/libtree-sitter.so.0.22"
+: >"$supported_shim_lib/libtree-sitter-real.so.0.25"
+cat >"$supported_shim_bin/ldd" <<EOF
+#!$sh_bin
+printf '%s\n' 'libtree-sitter.so.0.22 => $supported_shim_lib/libtree-sitter.so.0.22 (0x00000000)'
+EOF
+chmod +x "$supported_shim_bin/ldd"
+cat >"$supported_shim_bin/readelf" <<EOF
+#!$sh_bin
+last=
+for last do :; done
+case "\$last" in
+  */emacs)
+    printf '%s\n' ' 0x0000000000000001 (NEEDED)             Shared library: [libtree-sitter.so.0.22]'
+    ;;
+  */libtree-sitter.so.0.22)
+    printf '%s\n' \
+      ' 0x0000000000000001 (NEEDED)             Shared library: [libtree-sitter-real.so.0.25]' \
+      ' 0x000000000000000e (SONAME)             Library soname: [libtree-sitter.so.0.22]'
+    ;;
+  */libtree-sitter-real.so.0.25)
+    printf '%s\n' ' 0x000000000000000e (SONAME)             Library soname: [libtree-sitter-real.so.0.25]'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "$supported_shim_bin/readelf"
+
+unrelated_supported_bin=$probe_dir/unrelated-supported-bin
+unrelated_supported_lib=$probe_dir/unrelated-runtime/lib
+mkdir -p "$unrelated_supported_bin" "$unrelated_supported_lib"
+cp "$fake_bin/emacs" "$unrelated_supported_bin/emacs"
+: >"$unrelated_supported_lib/libtree-sitter.so.0.22"
+: >"$unrelated_supported_lib/libtree-sitter.so.0.25"
+cat >"$unrelated_supported_bin/ldd" <<EOF
+#!$sh_bin
+printf '%s\n' \
+  'libtree-sitter.so.0.22 => $unrelated_supported_lib/libtree-sitter.so.0.22 (0x00000000)' \
+  'libtree-sitter.so.0.25 => $unrelated_supported_lib/libtree-sitter.so.0.25 (0x00000000)'
+EOF
+chmod +x "$unrelated_supported_bin/ldd"
+cat >"$unrelated_supported_bin/readelf" <<EOF
+#!$sh_bin
+last=
+for last do :; done
+case "\$last" in
+  */emacs)
+    printf '%s\n' ' 0x0000000000000001 (NEEDED)             Shared library: [libtree-sitter.so.0.22]'
+    ;;
+  */libtree-sitter.so.0.22)
+    printf '%s\n' ' 0x000000000000000e (SONAME)             Library soname: [libtree-sitter.so.0.22]'
+    ;;
+  */libtree-sitter.so.0.25)
+    printf '%s\n' ' 0x000000000000000e (SONAME)             Library soname: [libtree-sitter.so.0.25]'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "$unrelated_supported_bin/readelf"
+
 relative_shell_cwd=$probe_dir/relative-shell-cwd
 relative_shell_bin=$relative_shell_cwd/rel-sh-bin
 mkdir -p "$relative_shell_bin"
@@ -160,6 +239,16 @@ run_probe() {
   set -e
 
   case "$expected" in
+    pass)
+      if [ "$status" -ne 0 ]; then
+        printf 'FAIL %s: expected zero status\n%s\n' "$name" "$output" >&2
+        exit 1
+      fi
+      if ! grep -q 'tree-sitter runtime OK for tests' <<<"$output"; then
+        printf 'FAIL %s: success message missing\n%s\n' "$name" "$output" >&2
+        exit 1
+      fi
+      ;;
     fail)
       if [ "$status" -eq 0 ]; then
         printf 'FAIL %s: expected non-zero status\n%s\n' "$name" "$output" >&2
@@ -233,6 +322,15 @@ run_probe() {
 
 run_probe "unsupported plain emacs fails" fail \
   env PATH="$probe_path" EMACS=emacs "$check_script"
+
+run_probe "misleading 0.25 path with 0.22 basename fails" fail \
+  env PATH="$misleading_path_bin:$PATH" EMACS=emacs "$check_script"
+
+run_probe "neutral path setup shim with real 0.25 passes" pass \
+  env PATH="$supported_shim_bin:$PATH" EMACS=emacs "$check_script"
+
+run_probe "unrelated 0.25 peer does not mask direct 0.22" fail \
+  env PATH="$unrelated_supported_bin:$PATH" EMACS=emacs "$check_script"
 
 run_probe "env -- PATH wrapper fails unsupported runtime" fail \
   env PATH="$probe_path" EMACS="env -- PATH=$probe_path emacs" "$check_script"

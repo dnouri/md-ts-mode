@@ -458,31 +458,425 @@ if ! validate_detector_env_replay; then
   exit 2
 fi
 
-lib_path=""
+tree_sitter_display=()
+tree_sitter_candidate_names=()
+tree_sitter_candidate_sources=()
+tree_sitter_direct_dependency_names=()
+tree_sitter_direct_library_paths=()
+direct_dependency_scan_reliable=false
+fallback_ldd_tree_sitter_entries=0
 detector_name=""
 emacs_exe_executable=false
+
+append_tree_sitter_display() {
+  local entry=$1
+  local existing=""
+
+  for existing in "${tree_sitter_display[@]}"; do
+    if [ "$existing" = "$entry" ]; then
+      return 0
+    fi
+  done
+  tree_sitter_display+=("$entry")
+}
+
+append_tree_sitter_candidate() {
+  local source=$1
+  local name=$2
+  local existing_source=""
+  local existing_name=""
+  local i=0
+
+  name=${name##*/}
+  name=${name%:}
+  name=${name%,}
+  if [ -z "$name" ]; then
+    return 0
+  fi
+  case "$name" in
+    *libtree-sitter*) ;;
+    *) return 0 ;;
+  esac
+
+  while [ "$i" -lt "${#tree_sitter_candidate_names[@]}" ]; do
+    existing_name=${tree_sitter_candidate_names[$i]}
+    existing_source=${tree_sitter_candidate_sources[$i]}
+    if [ "$existing_name" = "$name" ] && [ "$existing_source" = "$source" ]; then
+      return 0
+    fi
+    i=$((i + 1))
+  done
+
+  tree_sitter_candidate_names+=("$name")
+  tree_sitter_candidate_sources+=("$source")
+}
+
+append_tree_sitter_direct_dependency_name() {
+  local name=$1
+  local existing=""
+
+  name=${name##*/}
+  name=${name%:}
+  name=${name%,}
+  if [ -z "$name" ]; then
+    return 0
+  fi
+  case "$name" in
+    *libtree-sitter*) ;;
+    *) return 0 ;;
+  esac
+
+  for existing in "${tree_sitter_direct_dependency_names[@]}"; do
+    if [ "$existing" = "$name" ]; then
+      return 0
+    fi
+  done
+  tree_sitter_direct_dependency_names+=("$name")
+}
+
+tree_sitter_direct_dependency_p() {
+  local name=$1
+  local direct=""
+
+  if [ "$direct_dependency_scan_reliable" != true ]; then
+    return 1
+  fi
+
+  name=${name##*/}
+  name=${name%:}
+  name=${name%,}
+  for direct in "${tree_sitter_direct_dependency_names[@]}"; do
+    if [ "$direct" = "$name" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+append_tree_sitter_direct_library_path() {
+  local path=$1
+  local existing=""
+
+  if [ -z "$path" ]; then
+    return 0
+  fi
+  for existing in "${tree_sitter_direct_library_paths[@]}"; do
+    if [ "$existing" = "$path" ]; then
+      return 0
+    fi
+  done
+  tree_sitter_direct_library_paths+=("$path")
+}
+
+resolve_runtime_path() {
+  local path=$1
+  local resolved=""
+
+  if [ -z "$path" ] || [ ! -e "$path" ]; then
+    return 1
+  fi
+
+  if command -v realpath >/dev/null 2>&1; then
+    resolved=$(realpath "$path" 2>/dev/null || true)
+  fi
+  if [ -z "$resolved" ] && command -v readlink >/dev/null 2>&1; then
+    resolved=$(readlink -f "$path" 2>/dev/null || true)
+  fi
+  if [ -z "$resolved" ]; then
+    resolved=$path
+  fi
+  printf '%s\n' "$resolved"
+}
+
+record_tree_sitter_token() {
+  local source=$1
+  local token=$2
+  local support_candidate=${3:-true}
+  local direct_library=${4:-false}
+  local resolved=""
+
+  token=${token%:}
+  token=${token%,}
+  if [ -z "$token" ] || [ "$token" = "not" ]; then
+    return 0
+  fi
+  case "$token" in
+    *libtree-sitter*) ;;
+    *) return 0 ;;
+  esac
+
+  append_tree_sitter_display "$source: $token"
+  if [ "$support_candidate" = true ]; then
+    append_tree_sitter_candidate "$source" "$token"
+  fi
+
+  case "$token" in
+    /*|./*|../*)
+      if [ -e "$token" ]; then
+        resolved=$(resolve_runtime_path "$token" || true)
+        if [ -n "$resolved" ]; then
+          if [ "$direct_library" = true ]; then
+            append_tree_sitter_direct_library_path "$resolved"
+          fi
+          if [ "$resolved" != "$token" ]; then
+            append_tree_sitter_display "$source resolved: $resolved"
+            if [ "$support_candidate" = true ]; then
+              append_tree_sitter_candidate "$source resolved" "$resolved"
+            fi
+          fi
+        fi
+      fi
+      ;;
+  esac
+}
+
+parse_ldd_tree_sitter_output() {
+  local output=$1
+  local line=""
+  local found_arrow=false
+  local direct_entry=false
+  local fallback_entry_seen=false
+  local i=0
+  local -a fields=()
+
+  while IFS= read -r line; do
+    case "$line" in
+      *libtree-sitter*) ;;
+      *) continue ;;
+    esac
+
+    read -r -a fields <<< "$line"
+    if [ "${#fields[@]}" -eq 0 ]; then
+      continue
+    fi
+
+    direct_entry=false
+    if [ "$direct_dependency_scan_reliable" = true ]; then
+      if tree_sitter_direct_dependency_p "${fields[0]}"; then
+        direct_entry=true
+      fi
+    else
+      fallback_ldd_tree_sitter_entries=$((fallback_ldd_tree_sitter_entries + 1))
+      if [ "$fallback_entry_seen" != true ]; then
+        direct_entry=true
+        fallback_entry_seen=true
+      fi
+    fi
+
+    found_arrow=false
+    i=0
+    while [ "$i" -lt "${#fields[@]}" ]; do
+      if [ "${fields[$i]}" = "=>" ]; then
+        record_tree_sitter_token "ldd name" "${fields[0]}" "$direct_entry" false
+        if [ $((i + 1)) -lt "${#fields[@]}" ]; then
+          record_tree_sitter_token "ldd path" "${fields[$((i + 1))]}" \
+            "$direct_entry" "$direct_entry"
+        fi
+        found_arrow=true
+        break
+      fi
+      i=$((i + 1))
+    done
+
+    if [ "$found_arrow" != true ]; then
+      record_tree_sitter_token "ldd entry" "${fields[0]}" \
+        "$direct_entry" "$direct_entry"
+    fi
+  done <<< "$output"
+}
+
+parse_otool_tree_sitter_output() {
+  local output=$1
+  local source="${2:-otool -L entry}"
+  local support_candidate=${3:-true}
+  local direct_library=${4:-false}
+  local line=""
+  local -a fields=()
+
+  while IFS= read -r line; do
+    case "$line" in
+      *libtree-sitter*) ;;
+      *) continue ;;
+    esac
+
+    read -r -a fields <<< "$line"
+    if [ "${#fields[@]}" -gt 0 ]; then
+      record_tree_sitter_token "$source" "${fields[0]}" \
+        "$support_candidate" "$direct_library"
+    fi
+  done <<< "$output"
+}
+
+record_readelf_metadata_names() {
+  local output=$1
+  local base=$2
+  local line=""
+  local name=""
+  local source=""
+
+  while IFS= read -r line; do
+    case "$line" in
+      *"Library soname:"*"["*"]"*) source="ELF SONAME for $base" ;;
+      *"Shared library:"*"["*"]"*) source="ELF NEEDED for $base" ;;
+      *) continue ;;
+    esac
+
+    name=${line#*[}
+    name=${name%%]*}
+    record_tree_sitter_token "$source" "$name"
+  done <<< "$output"
+}
+
+record_readelf_direct_dependency_names() {
+  local output=$1
+  local line=""
+  local name=""
+
+  while IFS= read -r line; do
+    case "$line" in
+      *"Shared library:"*"["*"]"*) ;;
+      *) continue ;;
+    esac
+
+    name=${line#*[}
+    name=${name%%]*}
+    append_tree_sitter_direct_dependency_name "$name"
+  done <<< "$output"
+}
+
+load_direct_tree_sitter_dependencies() {
+  local readelf_bin=""
+  local output=""
+  local before_count=0
+
+  if readelf_bin=$(command -v readelf 2>/dev/null); then
+    before_count=${#tree_sitter_direct_dependency_names[@]}
+    output=$(run_detector "$readelf_bin" -d "$emacs_exe" 2>/dev/null || true)
+    record_readelf_direct_dependency_names "$output"
+    if [ "${#tree_sitter_direct_dependency_names[@]}" -gt "$before_count" ]; then
+      direct_dependency_scan_reliable=true
+    fi
+  fi
+}
+
+inspect_tree_sitter_library_metadata() {
+  local i=0
+  local path=""
+  local readelf_bin=""
+  local otool_bin=""
+  local output=""
+  local base=""
+
+  while [ "$i" -lt "${#tree_sitter_direct_library_paths[@]}" ]; do
+    path=${tree_sitter_direct_library_paths[$i]}
+    base=${path##*/}
+
+    if readelf_bin=$(command -v readelf 2>/dev/null); then
+      output=$(run_detector "$readelf_bin" -d "$path" 2>/dev/null || true)
+      if [ -n "$output" ]; then
+        record_readelf_metadata_names "$output" "$base"
+      fi
+    fi
+
+    if otool_bin=$(command -v otool 2>/dev/null); then
+      output=$(run_detector "$otool_bin" -D "$path" 2>/dev/null || true)
+      if [ -n "$output" ]; then
+        parse_otool_tree_sitter_output "$output" "Mach-O install name for $base"
+      fi
+
+      output=$(run_detector "$otool_bin" -L "$path" 2>/dev/null || true)
+      if [ -n "$output" ]; then
+        parse_otool_tree_sitter_output "$output" "Mach-O dependency for $base"
+      fi
+    fi
+
+    i=$((i + 1))
+  done
+}
+
+tree_sitter_chain_summary() {
+  local entry=""
+  local first=true
+
+  for entry in "${tree_sitter_display[@]}"; do
+    if [ "$first" = true ]; then
+      printf '%s' "$entry"
+      first=false
+    else
+      printf '; %s' "$entry"
+    fi
+  done
+}
+
+extract_tree_sitter_minor() {
+  local text=$1
+
+  if [[ "$text" =~ (^|[^0-9])0\.([0-9]+)($|[^0-9]) ]]; then
+    printf '%s\n' "${BASH_REMATCH[2]}"
+    return 0
+  fi
+  return 1
+}
+
+tree_sitter_minor_supported() {
+  local minor=$1
+
+  if [ "$major" -le 30 ]; then
+    [ "$minor" = 25 ]
+  else
+    [ "$minor" = 25 ] || [ "$minor" = 26 ]
+  fi
+}
+
+supported=false
+version_visible=false
+supported_detail=""
+visible_version_summary=""
+
+evaluate_tree_sitter_runtime() {
+  local i=0
+  local name=""
+  local source=""
+  local minor=""
+  local detail=""
+
+  while [ "$i" -lt "${#tree_sitter_candidate_names[@]}" ]; do
+    name=${tree_sitter_candidate_names[$i]}
+    source=${tree_sitter_candidate_sources[$i]}
+
+    if minor=$(extract_tree_sitter_minor "$name"); then
+      version_visible=true
+      detail="$source: $name"
+      if [ -z "$visible_version_summary" ]; then
+        visible_version_summary=$detail
+      else
+        visible_version_summary="$visible_version_summary; $detail"
+      fi
+
+      if tree_sitter_minor_supported "$minor"; then
+        supported=true
+        supported_detail=$detail
+        return 0
+      fi
+    fi
+
+    i=$((i + 1))
+  done
+}
 
 if emacs_exe_is_executable; then
   emacs_exe_executable=true
 fi
 
 if [ "$emacs_exe_executable" = true ]; then
+  load_direct_tree_sitter_dependencies
+
   if ldd_bin=$(command -v ldd 2>/dev/null); then
     detector_name="ldd"
     detector_output=""
     if run_detector_checked "$detector_name" detector_output \
         "$ldd_bin" "$emacs_exe"; then
-      lib_path=$(
-        printf '%s\n' "$detector_output" \
-          | awk '/libtree-sitter/ {
-              for (i = 1; i < NF; i++) {
-                if ($i == "=>" && $(i + 1) != "not") { print $(i + 1); exit }
-              }
-              for (i = 1; i <= NF; i++) {
-                if ($i ~ /libtree-sitter/ && $i != "=>") { print $i; exit }
-              }
-            }'
-      )
+      parse_ldd_tree_sitter_output "$detector_output"
     else
       detector_status=$?
       if [ "$detector_status" -eq 2 ]; then
@@ -494,15 +888,12 @@ if [ "$emacs_exe_executable" = true ]; then
     fi
   fi
 
-  if [ -z "$lib_path" ] && otool_bin=$(command -v otool 2>/dev/null); then
+  if [ "${#tree_sitter_display[@]}" -eq 0 ] && otool_bin=$(command -v otool 2>/dev/null); then
     detector_name="otool -L"
     detector_output=""
     if run_detector_checked "$detector_name" detector_output \
         "$otool_bin" -L "$emacs_exe"; then
-      lib_path=$(
-        printf '%s\n' "$detector_output" \
-          | awk '/libtree-sitter/ { print $1; exit }'
-      )
+      parse_otool_tree_sitter_output "$detector_output" "otool -L entry" true true
     else
       detector_status=$?
       if [ "$detector_status" -eq 2 ]; then
@@ -515,23 +906,15 @@ if [ "$emacs_exe_executable" = true ]; then
   fi
 fi
 
-version_text=$lib_path
-
-if [ -n "$lib_path" ] && command -v realpath >/dev/null 2>&1 && [ -e "$lib_path" ]; then
-  resolved_lib_path=$(realpath "$lib_path" 2>/dev/null || true)
-  if [ -n "$resolved_lib_path" ]; then
-    lib_path=$resolved_lib_path
-  fi
-elif [ -n "$lib_path" ] && command -v readlink >/dev/null 2>&1 && [ -e "$lib_path" ]; then
-  resolved_lib_path=$(readlink -f "$lib_path" 2>/dev/null || true)
-  if [ -n "$resolved_lib_path" ]; then
-    lib_path=$resolved_lib_path
-  fi
+if [ "$direct_dependency_scan_reliable" != true ] && \
+    [ "$fallback_ldd_tree_sitter_entries" -gt 1 ]; then
+  tree_sitter_candidate_names=()
+  tree_sitter_candidate_sources=()
+  tree_sitter_direct_library_paths=()
 fi
 
-if [ -n "$lib_path" ] && [ "$version_text" != "$lib_path" ]; then
-  version_text="$version_text $lib_path"
-fi
+inspect_tree_sitter_library_metadata
+evaluate_tree_sitter_runtime
 
 skip_detection() {
   local reason=$1
@@ -552,7 +935,7 @@ if [ "$emacs_exe_executable" != true ]; then
   exit 0
 fi
 
-if [ -z "$lib_path" ]; then
+if [ "${#tree_sitter_display[@]}" -eq 0 ]; then
   if [ -n "$detector_skip_reason" ]; then
     skip_detection "no usable ldd/otool -L libtree-sitter dependency was detected ($detector_skip_reason)"
   else
@@ -561,20 +944,11 @@ if [ -z "$lib_path" ]; then
   exit 0
 fi
 
-if ! [[ "$version_text" =~ 0\.[0-9]+ ]]; then
-  skip_detection "$detector_name found libtree-sitter, but no runtime version was visible: $lib_path"
-  exit 0
-fi
+chain_summary=$(tree_sitter_chain_summary)
 
-supported=false
-if [ "$major" -le 30 ]; then
-  case "$version_text" in
-    *0.25*) supported=true ;;
-  esac
-else
-  case "$version_text" in
-    *0.25*|*0.26*) supported=true ;;
-  esac
+if [ "$version_visible" != true ]; then
+  skip_detection "$detector_name found libtree-sitter, but no runtime version was visible in library basenames/SONAME/NEEDED entries: $chain_summary"
+  exit 0
 fi
 
 if [ "$supported" != true ]; then
@@ -582,7 +956,8 @@ if [ "$supported" != true ]; then
 md-ts-mode tests: unsupported tree-sitter runtime
   Emacs command: $emacs_label (major $major)
   Emacs executable: $emacs_exe
-  Effective libtree-sitter ($detector_name): $lib_path
+  Effective libtree-sitter chain ($detector_name): $chain_summary
+  Visible runtime versions: $visible_version_summary
 
 Supported test runtimes:
   - Emacs 29/30 with libtree-sitter 0.25.x
@@ -602,4 +977,4 @@ EOF
   exit 2
 fi
 
-echo "tree-sitter runtime OK for tests: Emacs $major using $lib_path ($detector_name)"
+echo "tree-sitter runtime OK for tests: Emacs $major using $supported_detail ($detector_name)"
