@@ -79,6 +79,30 @@ fi
 detector_env=()
 emacs_exe=""
 
+resolve_bare_executable() {
+  local exe=$1
+  local resolved=""
+  local sh_bin=""
+
+  if [ "${#detector_env[@]}" -gt 0 ]; then
+    sh_bin=$(command -v sh 2>/dev/null || true)
+    if [ -z "$sh_bin" ]; then
+      return 1
+    fi
+    resolved=$(env "${detector_env[@]}" "$sh_bin" -c \
+      'command -v -- "$1"' sh "$exe" 2>/dev/null || true)
+  else
+    resolved=$(command -v -- "$exe" 2>/dev/null || true)
+  fi
+
+  if [ -n "$resolved" ]; then
+    emacs_exe=$resolved
+    return 0
+  fi
+
+  return 1
+}
+
 resolve_emacs_executable() {
   local -a words=("${emacs_argv[@]}")
   local i=0
@@ -86,52 +110,57 @@ resolve_emacs_executable() {
 
   while [ "$i" -lt "${#words[@]}" ]; do
     word=${words[$i]}
-    if [ "$word" = "env" ]; then
-      i=$((i + 1))
-      while [ "$i" -lt "${#words[@]}" ]; do
-        word=${words[$i]}
-        case "$word" in
-          -i|--ignore-environment|-0|--null)
-            detector_env+=("$word")
-            i=$((i + 1))
-            ;;
-          -u|--unset)
-            if [ $((i + 1)) -lt "${#words[@]}" ]; then
-              detector_env+=("$word" "${words[$((i + 1))]}")
-              i=$((i + 2))
-            else
+    case "$word" in
+      env|*/env)
+        i=$((i + 1))
+        while [ "$i" -lt "${#words[@]}" ]; do
+          word=${words[$i]}
+          case "$word" in
+            -i|--ignore-environment|-0|--null)
+              detector_env+=("$word")
+              i=$((i + 1))
+              ;;
+            -u|--unset)
+              if [ $((i + 1)) -lt "${#words[@]}" ]; then
+                detector_env+=("$word" "${words[$((i + 1))]}")
+                i=$((i + 2))
+              else
+                return 1
+              fi
+              ;;
+            --unset=*)
+              detector_env+=("$word")
+              i=$((i + 1))
+              ;;
+            --)
+              i=$((i + 1))
+              break
+              ;;
+            --*)
               return 1
-            fi
-            ;;
-          --unset=*)
-            detector_env+=("$word")
-            i=$((i + 1))
-            ;;
-          --)
-            i=$((i + 1))
-            break
-            ;;
-          *=*)
-            detector_env+=("$word")
-            i=$((i + 1))
-            ;;
-          *)
-            break
-            ;;
-        esac
-      done
-      continue
-    fi
+              ;;
+            -*)
+              return 1
+              ;;
+            *=*)
+              detector_env+=("$word")
+              i=$((i + 1))
+              ;;
+            *)
+              break
+              ;;
+          esac
+        done
+        continue
+        ;;
+    esac
 
     case "$word" in
       */*)
         emacs_exe=$word
         ;;
       *)
-        emacs_exe=$(command -v -- "$word" 2>/dev/null || true)
-        if [ -z "$emacs_exe" ]; then
-          emacs_exe=$word
-        fi
+        resolve_bare_executable "$word" || return 1
         ;;
     esac
     return 0

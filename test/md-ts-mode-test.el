@@ -4310,6 +4310,160 @@ inline parser ranges cause the first range's faces to be dropped."
         (kill-buffer indirect))
       (kill-buffer base))))
 
+(ert-deftest md-ts-test-mode-exit-cleans-parsed-link-button ()
+  "Leaving `md-ts-mode' should remove parsed link button side effects."
+  (let ((buf (md-ts-test--fontify "See [Doc](https://example.com/doc) now.\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "Doc")
+          (let ((pos (match-beginning 0)))
+            (should (md-ts--link-button-p (button-at pos)))
+            (fundamental-mode)
+            (should (eq major-mode 'fundamental-mode))
+            (should-not (button-at pos))
+            (dolist (prop '(button category action help-echo
+                                   md-ts-link-button
+                                   md-ts-link-help-echo
+                                   md-ts-link-static-target))
+              (should-not (get-text-property pos prop)))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-mode-exit-cleans-bare-link-button-read-only-narrowed ()
+  "Mode-exit cleanup should remove bare buttons despite read-only/narrowing."
+  (let ((buf (md-ts-test--fontify
+              "Narrowed line only.\nVisit https://example.com/path now.\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "https://example.com/path")
+          (let ((pos (match-beginning 0)))
+            (should (md-ts--link-button-p (button-at pos)))
+            (should (get-text-property pos 'md-ts-bare-link-face))
+            (goto-char (point-min))
+            (narrow-to-region (line-beginning-position)
+                              (line-end-position))
+            (setq buffer-read-only t)
+            (fundamental-mode)
+            (should (eq major-mode 'fundamental-mode))
+            (save-restriction
+              (widen)
+              (should-not (button-at pos))
+              (dolist (prop '(button category action help-echo
+                                     md-ts-link-button
+                                     md-ts-link-help-echo
+                                     md-ts-link-static-target
+                                     md-ts-bare-link-face))
+                (should-not (get-text-property pos prop)))
+              (should-not (md-ts--link-face-value-p
+                           (get-text-property pos 'face))))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-mode-exit-cleans-display-properties ()
+  "Leaving `md-ts-mode' should remove md-ts-owned display properties."
+  (let ((buf (md-ts-test--fontify "- [ ] todo\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "[ ]")
+          (let ((pos (match-beginning 0)))
+            (should (equal (get-text-property pos 'display) "☐"))
+            (should (equal (get-text-property pos 'md-ts-display) "☐"))
+            (fundamental-mode)
+            (should (eq major-mode 'fundamental-mode))
+            (should-not (get-text-property pos 'display))
+            (should-not (get-text-property pos 'md-ts-display))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-mode-exit-cleans-invisible-markup ()
+  "Leaving `md-ts-mode' should remove md-ts-owned invisible markup."
+  (let* ((md-ts-hide-markup t)
+         (buf (md-ts-test--fontify "**bold**\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "**")
+          (let ((pos (match-beginning 0)))
+            (should (md-ts--invisible-value-includes-p
+                     (get-text-property pos 'invisible) 'md-ts--markup))
+            (fundamental-mode)
+            (should (eq major-mode 'fundamental-mode))
+            (should-not (md-ts--invisible-value-includes-p
+                         (get-text-property pos 'invisible)
+                         'md-ts--markup))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-mode-exit-indirect-preserves-base-link-buttons ()
+  "Indirect mode exit must not strip valid base-buffer link buttons."
+  (let ((base (md-ts-test--fontify
+               "See [Doc](https://example.com/doc) and https://example.com/path.\n"))
+        indirect parsed-pos bare-pos)
+    (unwind-protect
+        (progn
+          (with-current-buffer base
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (setq parsed-pos (match-beginning 0))
+            (search-forward "https://example.com/path")
+            (setq bare-pos (match-beginning 0))
+            (should (md-ts--link-button-p (button-at parsed-pos)))
+            (should (md-ts--link-button-p (button-at bare-pos))))
+          (setq indirect (make-indirect-buffer base " *md-ts-indirect*" t))
+          (with-current-buffer indirect
+            (md-ts-mode)
+            (fundamental-mode))
+          (with-current-buffer base
+            (let ((parsed-button (button-at parsed-pos))
+                  (bare-button (button-at bare-pos)))
+              (should (md-ts--link-button-p parsed-button))
+              (should-not (button-get parsed-button
+                                      'md-ts-link-static-target))
+              (should (md-ts--link-button-p bare-button))
+              (should (equal (button-get bare-button
+                                         'md-ts-link-static-target)
+                             "https://example.com/path")))))
+      (when (buffer-live-p indirect)
+        (kill-buffer indirect))
+      (kill-buffer base))))
+
+(ert-deftest md-ts-test-mode-exit-base-keeps-until-indirect-kill-cleans ()
+  "Base mode exit should preserve indirect-owned props until last owner dies."
+  (let ((base (md-ts-test--fontify
+               "See [Doc](https://example.com/doc) and https://example.com/path.\n"))
+        indirect parsed-pos bare-pos)
+    (unwind-protect
+        (progn
+          (with-current-buffer base
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (setq parsed-pos (match-beginning 0))
+            (search-forward "https://example.com/path")
+            (setq bare-pos (match-beginning 0))
+            (should (md-ts--link-button-p (button-at parsed-pos)))
+            (should (md-ts--link-button-p (button-at bare-pos))))
+          (setq indirect (make-indirect-buffer base " *md-ts-indirect*" t))
+          (with-current-buffer indirect
+            (md-ts-mode))
+          (with-current-buffer base
+            (fundamental-mode)
+            (should (eq major-mode 'fundamental-mode))
+            (should (md-ts--link-button-p (button-at parsed-pos)))
+            (should (md-ts--link-button-p (button-at bare-pos))))
+          (kill-buffer indirect)
+          (setq indirect nil)
+          (with-current-buffer base
+            (should-not (button-at parsed-pos))
+            (should-not (button-at bare-pos))
+            (dolist (pos (list parsed-pos bare-pos))
+              (dolist (prop '(button category action help-echo
+                                     md-ts-link-button
+                                     md-ts-link-help-echo
+                                     md-ts-link-static-target))
+                (should-not (get-text-property pos prop))))))
+      (when (buffer-live-p indirect)
+        (kill-buffer indirect))
+      (kill-buffer base))))
+
 (ert-deftest md-ts-test-link-indirect-parsed-narrowed-base-fontifies-and-opens ()
   "Indirect parsed links should fontify/open when the base is narrowed away."
   (let ((base (generate-new-buffer " *md-ts-test*"))

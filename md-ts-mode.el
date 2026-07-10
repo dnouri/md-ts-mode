@@ -3926,6 +3926,35 @@ when point is not on a supported link."
 
 ;;; Major mode
 
+(defun md-ts--cleanup-whole-buffer-side-effect-properties ()
+  "Remove md-ts-owned whole-buffer text-property side effects."
+  (with-silent-modifications
+    (let ((inhibit-read-only t))
+      (save-restriction
+        (widen)
+        (md-ts--remove-invisible-properties (point-min) (point-max))
+        (md-ts--remove-display-properties (point-min) (point-max))
+        (md-ts--remove-bare-link-button-properties (point-min) (point-max))
+        (md-ts--remove-link-button-properties (point-min) (point-max))))))
+
+(defun md-ts--other-md-ts-buffer-sharing-text-p ()
+  "Return non-nil when another live `md-ts-mode' buffer shares text."
+  (let ((current (current-buffer))
+        (root (or (buffer-base-buffer) (current-buffer))))
+    (seq-some
+     (lambda (buffer)
+       (and (not (eq buffer current))
+            (with-current-buffer buffer
+              (and (eq (or (buffer-base-buffer) (current-buffer)) root)
+                   (eq major-mode 'md-ts-mode)))))
+     (buffer-list))))
+
+(defun md-ts--teardown-side-effect-properties ()
+  "Clean md-ts-owned side effects before leaving or killing `md-ts-mode'."
+  (when (and (eq major-mode 'md-ts-mode)
+             (not (md-ts--other-md-ts-buffer-sharing-text-p)))
+    (md-ts--cleanup-whole-buffer-side-effect-properties)))
+
 (defun md-ts--setup-clean-side-effect-properties ()
   "Clean md-ts-owned whole-buffer side effects for mode setup.
 Indirect buffers share text properties with their base buffer, so a
@@ -3933,12 +3962,7 @@ setup-time whole-buffer sweep there would strip the base buffer's
 current UI before regional refontification can recreate it.  Normal
 buffers still clean old md-ts properties when the mode starts."
   (unless (buffer-base-buffer)
-    (save-restriction
-      (widen)
-      (md-ts--remove-invisible-properties (point-min) (point-max))
-      (md-ts--remove-display-properties (point-min) (point-max))
-      (md-ts--remove-bare-link-button-properties (point-min) (point-max))
-      (md-ts--remove-link-button-properties (point-min) (point-max)))
+    (md-ts--cleanup-whole-buffer-side-effect-properties)
     (md-ts--font-lock-set-stale-side-effect-bounds nil)
     (md-ts--font-lock-set-dirty-side-effect-bounds nil)
     (md-ts--font-lock-set-side-effect-modified-tick
@@ -3971,6 +3995,10 @@ buffers still clean old md-ts properties when the mode starts."
             #'md-ts--font-lock-record-dirty-side-effect-bounds nil t)
   (add-hook 'after-change-functions
             #'md-ts--after-change-flush-link-reference-links nil t)
+  (add-hook 'change-major-mode-hook
+            #'md-ts--teardown-side-effect-properties nil t)
+  (add-hook 'kill-buffer-hook
+            #'md-ts--teardown-side-effect-properties nil t)
 
   (when (treesit-ready-p 'html t)
     (md-ts--parser-create 'html)
