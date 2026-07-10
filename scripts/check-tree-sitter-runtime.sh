@@ -77,12 +77,43 @@ EOF
 fi
 
 detector_env=()
+detector_env_exe=""
 emacs_exe=""
 resolve_error=""
 
 set_resolve_error() {
   resolve_error=$1
   return 1
+}
+
+record_env_executable() {
+  local env_word=$1
+  local resolved=""
+
+  case "$env_word" in
+    */*)
+      if [ ! -x "$env_word" ]; then
+        set_resolve_error "env wrapper is not executable: $env_word"
+        return 1
+      fi
+      resolved=$env_word
+      ;;
+    *)
+      resolved=$(command -v -- "$env_word" 2>/dev/null || true)
+      if [ -z "$resolved" ]; then
+        set_resolve_error "could not resolve env wrapper: $env_word"
+        return 1
+      fi
+      ;;
+  esac
+
+  if [ -z "$detector_env_exe" ]; then
+    detector_env_exe=$resolved
+  elif [ "$detector_env_exe" != "$resolved" ]; then
+    set_resolve_error \
+      "multiple env wrappers cannot be safely replayed: $detector_env_exe and $resolved"
+    return 1
+  fi
 }
 
 resolve_bare_executable() {
@@ -92,10 +123,10 @@ resolve_bare_executable() {
 
   if [ "${#detector_env[@]}" -gt 0 ]; then
     sh_bin=$(command -v sh 2>/dev/null || true)
-    if [ -z "$sh_bin" ]; then
+    if [ -z "$sh_bin" ] || [ -z "$detector_env_exe" ]; then
       return 1
     fi
-    resolved=$(env "${detector_env[@]}" "$sh_bin" -c \
+    resolved=$("$detector_env_exe" "${detector_env[@]}" "$sh_bin" -c \
       'command -v -- "$1"' sh "$exe" 2>/dev/null || true)
   else
     resolved=$(command -v -- "$exe" 2>/dev/null || true)
@@ -118,10 +149,10 @@ emacs_exe_is_executable() {
 
   if [ "${#detector_env[@]}" -gt 0 ]; then
     sh_bin=$(command -v sh 2>/dev/null || true)
-    if [ -z "$sh_bin" ]; then
+    if [ -z "$sh_bin" ] || [ -z "$detector_env_exe" ]; then
       return 1
     fi
-    env "${detector_env[@]}" "$sh_bin" -c \
+    "$detector_env_exe" "${detector_env[@]}" "$sh_bin" -c \
       'test -x "$1"' sh "$emacs_exe" >/dev/null 2>&1
   else
     [ -x "$emacs_exe" ]
@@ -152,6 +183,7 @@ resolve_emacs_executable() {
     word=${words[$i]}
     case "$word" in
       env|*/env)
+        record_env_executable "$word" || return 1
         saw_env=true
         i=$((i + 1))
         parsing_options=true
@@ -241,25 +273,58 @@ run_detector() {
   local detector=$1
   shift
   if [ "${#detector_env[@]}" -gt 0 ]; then
-    env "${detector_env[@]}" "$detector" "$@"
+    "$detector_env_exe" "${detector_env[@]}" "$detector" "$@"
   else
     "$detector" "$@"
   fi
 }
 
-if ! resolve_emacs_executable; then
-  if [ -n "$resolve_error" ]; then
-    cat >&2 <<EOF
+validate_detector_env_replay() {
+  local true_bin=""
+
+  if [ "${#detector_env[@]}" -eq 0 ]; then
+    return 0
+  fi
+
+  if [ -z "$detector_env_exe" ]; then
+    set_resolve_error "env wrapper replay has no validated env executable"
+    return 1
+  fi
+
+  true_bin=$(command -v true 2>/dev/null || true)
+  if [ -z "$true_bin" ]; then
+    set_resolve_error "could not resolve true for env wrapper replay validation"
+    return 1
+  fi
+
+  if ! "$detector_env_exe" "${detector_env[@]}" "$true_bin" >/dev/null 2>&1; then
+    set_resolve_error "could not replay env wrapper for runtime detector"
+    return 1
+  fi
+}
+
+report_resolve_error() {
+  cat >&2 <<EOF
 md-ts-mode tests: could not safely resolve Emacs executable
   Emacs command: $emacs_label (major $major)
   Reason: $resolve_error
 
 This preflight refuses to inspect a guessed binary when an EMACS env
-wrapper cannot be parsed or resolved.  To bypass it explicitly, set
-SKIP_RUNTIME_CHECK=1 (or MD_TS_SKIP_RUNTIME_CHECK=1).
+wrapper cannot be parsed, resolved, or replayed.  To bypass it explicitly,
+set SKIP_RUNTIME_CHECK=1 (or MD_TS_SKIP_RUNTIME_CHECK=1).
 EOF
+}
+
+if ! resolve_emacs_executable; then
+  if [ -n "$resolve_error" ]; then
+    report_resolve_error
     exit 2
   fi
+fi
+
+if ! validate_detector_env_replay; then
+  report_resolve_error
+  exit 2
 fi
 
 lib_path=""

@@ -4396,6 +4396,32 @@ inline parser ranges cause the first range's faces to be dropped."
                          'md-ts--markup))))
       (kill-buffer buf))))
 
+(ert-deftest md-ts-test-live-reload-backfills-legacy-cleanup-owner ()
+  "Live reload should make existing derived md-ts buffers cleanup owners."
+  (let ((buf (generate-new-buffer " *md-ts-test-live-reload-owner*"))
+        parsed-pos)
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "See [Doc](https://example.com/doc) now.\n")
+          (md-ts-test-derived-mode)
+          (font-lock-ensure)
+          (goto-char (point-min))
+          (search-forward "Doc")
+          (setq parsed-pos (match-beginning 0))
+          (should (md-ts--link-button-p (button-at parsed-pos)))
+          (setq-local md-ts--side-effect-properties-owner nil)
+          (md-ts--backfill-side-effect-properties-ownership)
+          (should-not (md-ts--side-effect-properties-owner-p))
+          (kill-local-variable 'md-ts--side-effect-properties-owner)
+          (should-not (local-variable-p 'md-ts--side-effect-properties-owner
+                                        (current-buffer)))
+          (md-ts--backfill-side-effect-properties-ownership)
+          (should (md-ts--side-effect-properties-owner-p))
+          (fundamental-mode)
+          (should (eq major-mode 'fundamental-mode))
+          (should-not (button-at parsed-pos)))
+      (kill-buffer buf))))
+
 (ert-deftest md-ts-test-mode-exit-derived-cleans-link-buttons ()
   "Leaving a mode derived from `md-ts-mode' should clean link props."
   (let ((buf (generate-new-buffer " *md-ts-test-derived-exit*"))
