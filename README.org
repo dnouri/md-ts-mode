@@ -138,7 +138,10 @@ Run ~make check~ before sending changes.  Test and smoke targets first
 verify that the selected =EMACS= uses a supported libtree-sitter runtime when
 =ldd= or =otool -L= can identify it; if a distro Emacs links to an older
 runtime such as 0.22, use =scripts/setup-tree-sitter-runtime.sh= as shown by
-the failure message.  Wrapper or non-Linux setups that cannot be detected are
+the failure message.  The runtime detector supports direct =EMACS= executables
+and simple ~env VAR=... emacs~ forms; wrapper commands such as
+~EMACS="timeout 30 emacs"~ fail closed unless ~EMACS_BIN=/path/to/emacs~
+identifies the binary to inspect.  Non-Linux setups that cannot be detected are
 warned and allowed to continue.  To bypass the preflight knowingly, set
 =SKIP_RUNTIME_CHECK=1= (or =MD_TS_SKIP_RUNTIME_CHECK=1=).  ~make perf~ runs
 advisory link fontification benchmarks; compare =RESULT= lines from runs on

@@ -70,6 +70,17 @@ printf '%s\n' '\tlibtree-sitter.so.0.22 => $fake_lib/libtree-sitter.so.0.22 (0x0
 EOF
 chmod +x "$fake_bin/ldd"
 
+wrapper_bin=$probe_dir/wrapper-bin
+mkdir -p "$wrapper_bin"
+cp "$fake_bin/emacs" "$wrapper_bin/emacs"
+cp "$fake_bin/ldd" "$wrapper_bin/ldd"
+cat >"$wrapper_bin/timeout" <<EOF
+#!$sh_bin
+shift
+exec "\$@"
+EOF
+chmod +x "$wrapper_bin/timeout"
+
 probe_path=$fake_bin:$PATH
 
 env_bin=$(command -v env 2>/dev/null || true)
@@ -178,6 +189,44 @@ esac
 EOF
 chmod +x "$facade_025_real_022_bin/readelf"
 
+transitive_facade_bin=$probe_dir/transitive-facade-bin
+transitive_facade_lib=$probe_dir/transitive-facade/lib
+mkdir -p "$transitive_facade_bin" "$transitive_facade_lib"
+cp "$fake_bin/emacs" "$transitive_facade_bin/emacs"
+: >"$transitive_facade_lib/libtree-sitter.so.0.22"
+: >"$transitive_facade_lib/libtree-sitter-real.so.0.22"
+ln -s "libtree-sitter-real.so.0.22" \
+  "$transitive_facade_lib/libtree-sitter.so.0.25"
+cat >"$transitive_facade_bin/ldd" <<EOF
+#!$sh_bin
+printf '%s\n' \
+  'libtree-sitter.so.0.22 => $transitive_facade_lib/libtree-sitter.so.0.22 (0x00000000)' \
+  'libtree-sitter.so.0.25 => $transitive_facade_lib/libtree-sitter.so.0.25 (0x00000000)'
+EOF
+chmod +x "$transitive_facade_bin/ldd"
+cat >"$transitive_facade_bin/readelf" <<EOF
+#!$sh_bin
+last=
+for last do :; done
+case "\$last" in
+  */emacs)
+    printf '%s\n' ' 0x0000000000000001 (NEEDED)             Shared library: [libtree-sitter.so.0.22]'
+    ;;
+  */libtree-sitter.so.0.22)
+    printf '%s\n' \
+      ' 0x0000000000000001 (NEEDED)             Shared library: [libtree-sitter.so.0.25]' \
+      ' 0x000000000000000e (SONAME)             Library soname: [libtree-sitter.so.0.22]'
+    ;;
+  */libtree-sitter-real.so.0.22|*/libtree-sitter.so.0.25)
+    printf '%s\n' ' 0x000000000000000e (SONAME)             Library soname: [libtree-sitter.so.0.22]'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "$transitive_facade_bin/readelf"
+
 facade_025_real_026_bin=$probe_dir/facade-025-real-026-bin
 facade_025_real_026_lib=$probe_dir/facade-025-real-026/lib
 mkdir -p "$facade_025_real_026_bin" "$facade_025_real_026_lib"
@@ -216,7 +265,9 @@ cp "$fake_bin/emacs" "$supported_shim_bin/emacs"
 : >"$supported_shim_lib/libtree-sitter-real.so.0.25"
 cat >"$supported_shim_bin/ldd" <<EOF
 #!$sh_bin
-printf '%s\n' 'libtree-sitter.so.0.22 => $supported_shim_lib/libtree-sitter.so.0.22 (0x00000000)'
+printf '%s\n' \
+  'libtree-sitter.so.0.22 => $supported_shim_lib/libtree-sitter.so.0.22 (0x00000000)' \
+  'libtree-sitter-real.so.0.25 => $supported_shim_lib/libtree-sitter-real.so.0.25 (0x00000000)'
 EOF
 chmod +x "$supported_shim_bin/ldd"
 cat >"$supported_shim_bin/readelf" <<EOF
@@ -389,6 +440,9 @@ run_probe "misleading 0.25 path with 0.22 basename fails" fail \
 run_probe "0.25 facade resolving to real 0.22 fails" fail \
   env PATH="$facade_025_real_022_bin:$PATH" EMACS=emacs "$check_script"
 
+run_probe "transitive 0.25 facade resolving to real 0.22 fails" fail \
+  env PATH="$transitive_facade_bin:$PATH" EMACS=emacs "$check_script"
+
 run_probe "Emacs 30 0.25 facade resolving to real 0.26 fails" fail \
   env PATH="$facade_025_real_026_bin:$PATH" EMACS=emacs "$check_script"
 
@@ -397,6 +451,17 @@ run_probe "space path setup shim with real 0.25 passes" pass \
 
 run_probe "unrelated 0.25 peer does not mask direct 0.22" fail \
   env PATH="$unrelated_supported_bin:$PATH" EMACS=emacs "$check_script"
+
+run_probe "timeout wrapper fails closed without EMACS_BIN" resolve-fail \
+  env PATH="$wrapper_bin:$PATH" EMACS="timeout 30 emacs" "$check_script"
+
+run_probe "timeout wrapper with EMACS_BIN inspects Emacs" fail \
+  env PATH="$wrapper_bin:$PATH" EMACS="timeout 30 emacs" \
+    EMACS_BIN=emacs "$check_script"
+
+run_probe "timeout wrapper explicit skip bypasses" skip \
+  env PATH="$wrapper_bin:$PATH" EMACS="timeout 30 emacs" \
+    SKIP_RUNTIME_CHECK=1 "$check_script"
 
 run_probe "env -- PATH wrapper fails unsupported runtime" fail \
   env PATH="$probe_path" EMACS="env -- PATH=$probe_path emacs" "$check_script"

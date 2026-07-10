@@ -15,6 +15,7 @@ if [ "$skip_runtime_check" = true ]; then
 fi
 
 emacs_command=${EMACS:-emacs}
+emacs_bin_override=${EMACS_BIN:-}
 emacs_argv=()
 
 if [ "$#" -gt 1 ]; then
@@ -174,6 +175,31 @@ resolve_bare_executable() {
   return 1
 }
 
+resolve_emacs_bin_override() {
+  local candidate=$emacs_bin_override
+
+  if [ -z "$candidate" ]; then
+    return 1
+  fi
+
+  case "$candidate" in
+    */*)
+      emacs_exe=$candidate
+      ;;
+    *[[:space:]]*)
+      set_resolve_error \
+        "EMACS_BIN must be a single executable path or name, not a command: $candidate"
+      return 1
+      ;;
+    *)
+      if ! resolve_bare_executable "$candidate"; then
+        set_resolve_error "could not resolve EMACS_BIN executable: $candidate"
+        return 1
+      fi
+      ;;
+  esac
+}
+
 emacs_exe_is_executable() {
   local sh_bin=""
 
@@ -283,6 +309,11 @@ resolve_emacs_executable() {
         continue
         ;;
     esac
+
+    if [ -n "$emacs_bin_override" ]; then
+      resolve_emacs_bin_override || return 1
+      return 0
+    fi
 
     case "$word" in
       */*)
@@ -420,15 +451,92 @@ validate_detector_env_replay() {
   fi
 }
 
+resolve_path_for_compare() {
+  local path=$1
+  local resolved=""
+
+  if [ -n "$path" ] && [ -e "$path" ]; then
+    if command -v realpath >/dev/null 2>&1; then
+      resolved=$(realpath "$path" 2>/dev/null || true)
+    fi
+    if [ -z "$resolved" ] && command -v readlink >/dev/null 2>&1; then
+      resolved=$(readlink -f "$path" 2>/dev/null || true)
+    fi
+  fi
+  if [ -n "$resolved" ]; then
+    printf '%s\n' "$resolved"
+  else
+    printf '%s\n' "$path"
+  fi
+}
+
+validate_inspected_emacs_executable() {
+  local stderr_file=""
+  local inspected_major=""
+  local invocation_exe=""
+  local inspected_compare=""
+  local invocation_compare=""
+  local status=0
+  local stderr_text=""
+  local summary=""
+
+  if [ -z "$emacs_exe" ]; then
+    return 0
+  fi
+
+  if ! emacs_exe_is_executable; then
+    set_resolve_error "resolved inspected executable is not executable: $emacs_exe"
+    return 1
+  fi
+
+  stderr_file=$(mktemp)
+  set +e
+  inspected_major=$(run_detector "$emacs_exe" --batch -Q \
+    --eval '(princ emacs-major-version)' 2>"$stderr_file")
+  status=$?
+  set -e
+  stderr_text=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+  summary=$(summarize_detector_text "$stderr_text")
+
+  if [ "$status" -ne 0 ] || ! [[ "$inspected_major" =~ ^[0-9]+$ ]]; then
+    set_resolve_error \
+      "inspected executable is not a runnable Emacs binary: $emacs_exe${summary:+ ($summary)}"
+    return 1
+  fi
+
+  if [ "$inspected_major" != "$major" ]; then
+    set_resolve_error \
+      "inspected executable major version ($inspected_major) does not match EMACS command major version ($major): $emacs_exe"
+    return 1
+  fi
+
+  invocation_exe=$(run_emacs --batch -Q --eval \
+    '(when (and invocation-name invocation-directory) (princ (expand-file-name invocation-name invocation-directory)))' \
+    2>/dev/null || true)
+  if [ -n "$invocation_exe" ]; then
+    inspected_compare=$(resolve_path_for_compare "$emacs_exe")
+    invocation_compare=$(resolve_path_for_compare "$invocation_exe")
+    if [ "$inspected_compare" != "$invocation_compare" ]; then
+      set_resolve_error \
+        "EMACS runs $invocation_exe, but the detector would inspect $emacs_exe; set EMACS_BIN to the Emacs executable when using wrappers"
+      return 1
+    fi
+  fi
+}
+
 report_resolve_error() {
   cat >&2 <<EOF
 md-ts-mode tests: could not safely resolve Emacs executable
   Emacs command: $emacs_label (major $major)
   Reason: $resolve_error
 
-This preflight refuses to inspect a guessed binary when an EMACS env
-wrapper cannot be parsed, resolved, or replayed.  To bypass it explicitly,
-set SKIP_RUNTIME_CHECK=1 (or MD_TS_SKIP_RUNTIME_CHECK=1).
+This preflight refuses to inspect a guessed binary when EMACS cannot be
+resolved to a direct Emacs executable.  Supported command forms are a direct
+Emacs executable, optionally behind env(1) variable assignments.  For wrapper
+commands such as timeout, set EMACS_BIN to the Emacs executable inspected by
+this detector, or bypass explicitly with SKIP_RUNTIME_CHECK=1 (or
+MD_TS_SKIP_RUNTIME_CHECK=1).
 EOF
 }
 
@@ -458,6 +566,11 @@ if ! validate_detector_env_replay; then
   exit 2
 fi
 
+if ! validate_inspected_emacs_executable; then
+  report_resolve_error
+  exit 2
+fi
+
 tree_sitter_display=()
 tree_sitter_candidate_names=()
 tree_sitter_candidate_sources=()
@@ -465,6 +578,13 @@ tree_sitter_effective_candidate_names=()
 tree_sitter_effective_candidate_sources=()
 tree_sitter_direct_dependency_names=()
 tree_sitter_direct_library_paths=()
+tree_sitter_ldd_map_names=()
+tree_sitter_ldd_map_paths=()
+tree_sitter_library_inspection_stack=()
+readelf_metadata_needed_names=()
+readelf_metadata_soname=""
+tree_sitter_unresolved_needed=false
+tree_sitter_unresolved_needed_detail=""
 direct_dependency_scan_reliable=false
 fallback_ldd_tree_sitter_entries=0
 detector_name=""
@@ -544,6 +664,22 @@ append_tree_sitter_effective_candidate() {
   tree_sitter_effective_candidate_sources+=("$source")
 }
 
+record_unresolved_tree_sitter_needed() {
+  local base=$1
+  local needed=$2
+  local detail="ELF NEEDED for $base: $needed"
+
+  tree_sitter_unresolved_needed=true
+  if [ -z "$tree_sitter_unresolved_needed_detail" ]; then
+    tree_sitter_unresolved_needed_detail=$detail
+  else
+    tree_sitter_unresolved_needed_detail="$tree_sitter_unresolved_needed_detail; $detail"
+  fi
+  append_tree_sitter_display "unresolved $detail"
+  append_tree_sitter_effective_candidate \
+    "unresolved ELF NEEDED leaf for $base" "unresolved-libtree-sitter-needed"
+}
+
 append_tree_sitter_direct_dependency_name() {
   local name=$1
   local existing=""
@@ -619,6 +755,70 @@ resolve_runtime_path() {
     resolved=$path
   fi
   printf '%s\n' "$resolved"
+}
+
+append_tree_sitter_ldd_path_map() {
+  local name=$1
+  local path=$2
+  local resolved=""
+  local existing_name=""
+  local existing_path=""
+  local i=0
+
+  name=${name##*/}
+  name=${name%:}
+  name=${name%,}
+  case "$name" in
+    *libtree-sitter*) ;;
+    *) return 0 ;;
+  esac
+
+  path=${path%:}
+  path=${path%,}
+  case "$path" in
+    ""|not|"not found") return 0 ;;
+    /*|./*|../*) ;;
+    *) return 0 ;;
+  esac
+
+  resolved=$(resolve_runtime_path "$path" || true)
+  if [ -z "$resolved" ]; then
+    return 0
+  fi
+
+  while [ "$i" -lt "${#tree_sitter_ldd_map_names[@]}" ]; do
+    existing_name=${tree_sitter_ldd_map_names[$i]}
+    existing_path=${tree_sitter_ldd_map_paths[$i]}
+    if [ "$existing_name" = "$name" ]; then
+      if [ "$existing_path" = "$resolved" ]; then
+        return 0
+      fi
+      return 0
+    fi
+    i=$((i + 1))
+  done
+
+  tree_sitter_ldd_map_names+=("$name")
+  tree_sitter_ldd_map_paths+=("$resolved")
+}
+
+lookup_tree_sitter_ldd_path() {
+  local name=$1
+  local existing_name=""
+  local i=0
+
+  name=${name##*/}
+  name=${name%:}
+  name=${name%,}
+  while [ "$i" -lt "${#tree_sitter_ldd_map_names[@]}" ]; do
+    existing_name=${tree_sitter_ldd_map_names[$i]}
+    if [ "$existing_name" = "$name" ]; then
+      printf '%s\n' "${tree_sitter_ldd_map_paths[$i]}"
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
 }
 
 record_tree_sitter_token() {
@@ -720,10 +920,12 @@ parse_ldd_tree_sitter_output() {
       ldd_path=$(strip_ldd_address_suffix "${line#*=>}")
       record_tree_sitter_token "ldd name" "$ldd_name" "$direct_entry" false
       if [ -n "$ldd_path" ]; then
+        append_tree_sitter_ldd_path_map "$ldd_name" "$ldd_path"
         record_tree_sitter_token "ldd path" "$ldd_path" \
           "$direct_entry" "$direct_entry"
       fi
     else
+      append_tree_sitter_ldd_path_map "$ldd_name" "$ldd_name"
       record_tree_sitter_token "ldd entry" "$ldd_name" \
         "$direct_entry" "$direct_entry"
     fi
@@ -758,9 +960,9 @@ record_readelf_metadata_names() {
   local line=""
   local name=""
   local source=""
-  local soname=""
-  local -a needed_names=()
-  local needed=""
+
+  readelf_metadata_needed_names=()
+  readelf_metadata_soname=""
 
   while IFS= read -r line; do
     case "$line" in
@@ -775,20 +977,92 @@ record_readelf_metadata_names() {
     case "$name" in
       *libtree-sitter*)
         case "$source" in
-          "ELF NEEDED"*) needed_names+=("$name") ;;
-          "ELF SONAME"*) soname=$name ;;
+          "ELF NEEDED"*) readelf_metadata_needed_names+=("$name") ;;
+          "ELF SONAME"*) readelf_metadata_soname=$name ;;
         esac
         ;;
     esac
   done <<< "$output"
+}
 
-  if [ "${#needed_names[@]}" -gt 0 ]; then
-    for needed in "${needed_names[@]}"; do
-      append_tree_sitter_effective_candidate "ELF NEEDED leaf for $base" "$needed"
-    done
-  elif [ -n "$soname" ]; then
-    append_tree_sitter_effective_candidate "ELF SONAME leaf for $base" "$soname"
+tree_sitter_library_inspection_stack_contains() {
+  local path=$1
+  local existing=""
+
+  for existing in "${tree_sitter_library_inspection_stack[@]}"; do
+    if [ "$existing" = "$path" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+pop_tree_sitter_library_inspection_stack() {
+  local last_index=$((${#tree_sitter_library_inspection_stack[@]} - 1))
+
+  if [ "$last_index" -ge 0 ]; then
+    unset 'tree_sitter_library_inspection_stack[$last_index]'
   fi
+}
+
+inspect_tree_sitter_library_leaf() {
+  local path=$1
+  local resolved=""
+  local base=""
+  local readelf_bin=""
+  local output=""
+  local soname=""
+  local needed=""
+  local needed_path=""
+  local -a needed_names=()
+
+  resolved=$(resolve_runtime_path "$path" || true)
+  if [ -z "$resolved" ]; then
+    append_tree_sitter_effective_candidate "unresolved library path leaf" "$path"
+    return 0
+  fi
+  base=${resolved##*/}
+
+  if tree_sitter_library_inspection_stack_contains "$resolved"; then
+    append_tree_sitter_effective_candidate \
+      "recursive ELF NEEDED cycle at $base" "$resolved"
+    return 0
+  fi
+
+  tree_sitter_library_inspection_stack+=("$resolved")
+
+  if readelf_bin=$(command -v readelf 2>/dev/null); then
+    output=$(run_detector "$readelf_bin" -d "$resolved" 2>/dev/null || true)
+    if [ -n "$output" ]; then
+      record_readelf_metadata_names "$output" "$base"
+      soname=$readelf_metadata_soname
+      needed_names=("${readelf_metadata_needed_names[@]}")
+
+      if [ "${#needed_names[@]}" -gt 0 ]; then
+        for needed in "${needed_names[@]}"; do
+          needed_path=$(lookup_tree_sitter_ldd_path "$needed" || true)
+          if [ -n "$needed_path" ]; then
+            inspect_tree_sitter_library_leaf "$needed_path"
+          else
+            record_unresolved_tree_sitter_needed "$base" "$needed"
+          fi
+        done
+        pop_tree_sitter_library_inspection_stack
+        return 0
+      fi
+
+      if [ -n "$soname" ]; then
+        append_tree_sitter_effective_candidate \
+          "ELF SONAME leaf for $base" "$soname"
+        pop_tree_sitter_library_inspection_stack
+        return 0
+      fi
+    fi
+  fi
+
+  append_tree_sitter_effective_candidate \
+    "resolved library path leaf for $base" "$resolved"
+  pop_tree_sitter_library_inspection_stack
 }
 
 record_readelf_direct_dependency_names() {
@@ -826,7 +1100,6 @@ load_direct_tree_sitter_dependencies() {
 inspect_tree_sitter_library_metadata() {
   local i=0
   local path=""
-  local readelf_bin=""
   local otool_bin=""
   local output=""
   local base=""
@@ -837,12 +1110,7 @@ inspect_tree_sitter_library_metadata() {
     base=${path##*/}
     effective_before=${#tree_sitter_effective_candidate_names[@]}
 
-    if readelf_bin=$(command -v readelf 2>/dev/null); then
-      output=$(run_detector "$readelf_bin" -d "$path" 2>/dev/null || true)
-      if [ -n "$output" ]; then
-        record_readelf_metadata_names "$output" "$base"
-      fi
-    fi
+    inspect_tree_sitter_library_leaf "$path"
 
     if otool_bin=$(command -v otool 2>/dev/null); then
       output=$(run_detector "$otool_bin" -D "$path" 2>/dev/null || true)
@@ -1047,6 +1315,12 @@ if [ "${#tree_sitter_display[@]}" -eq 0 ]; then
 fi
 
 chain_summary=$(tree_sitter_chain_summary)
+
+if [ "$tree_sitter_unresolved_needed" = true ] && \
+    [ -z "$unsupported_effective_detail" ]; then
+  skip_detection "could not resolve libtree-sitter NEEDED through ldd path map: $tree_sitter_unresolved_needed_detail"
+  exit 0
+fi
 
 if [ "$version_visible" != true ]; then
   skip_detection "$detector_name found libtree-sitter, but no runtime version was visible in library basenames/SONAME/NEEDED entries: $chain_summary"

@@ -21,7 +21,7 @@ endif
 help:
 	@echo "Targets:"
 	@echo "  make test           Run ERT tests (SELECTOR=pattern, VERBOSE=1; SKIP_RUNTIME_CHECK=1 to bypass preflight)"
-	@echo "  make check-runtime  Verify supported Emacs/libtree-sitter runtime when detectable"
+	@echo "  make check-runtime  Verify supported Emacs/libtree-sitter runtime when detectable (EMACS_BIN=... for wrapper EMACS)"
 	@echo "  make runtime-probes Verify runtime preflight env-wrapper handling"
 	@echo "  make compile        Byte-compile package with warnings-as-errors"
 	@echo "  make compile-tests  Byte-compile tests with warnings-as-errors"
