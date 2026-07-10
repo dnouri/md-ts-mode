@@ -630,14 +630,30 @@ record_tree_sitter_token() {
   esac
 }
 
+trim_ldd_field() {
+  local value=$1
+
+  value=${value#"${value%%[![:space:]]*}"}
+  value=${value%"${value##*[![:space:]]}"}
+  printf '%s\n' "$value"
+}
+
+strip_ldd_address_suffix() {
+  local value=$1
+
+  if [[ "$value" =~ ^(.*)[[:space:]]+\(0x[[:xdigit:]]+\)[[:space:]]*$ ]]; then
+    value=${BASH_REMATCH[1]}
+  fi
+  trim_ldd_field "$value"
+}
+
 parse_ldd_tree_sitter_output() {
   local output=$1
   local line=""
-  local found_arrow=false
+  local ldd_name=""
+  local ldd_path=""
   local direct_entry=false
   local fallback_entry_seen=false
-  local i=0
-  local -a fields=()
 
   while IFS= read -r line; do
     case "$line" in
@@ -645,14 +661,18 @@ parse_ldd_tree_sitter_output() {
       *) continue ;;
     esac
 
-    read -r -a fields <<< "$line"
-    if [ "${#fields[@]}" -eq 0 ]; then
+    if [[ "$line" == *"=>"* ]]; then
+      ldd_name=$(trim_ldd_field "${line%%=>*}")
+    else
+      ldd_name=$(strip_ldd_address_suffix "$line")
+    fi
+    if [ -z "$ldd_name" ]; then
       continue
     fi
 
     direct_entry=false
     if [ "$direct_dependency_scan_reliable" = true ]; then
-      if tree_sitter_direct_dependency_p "${fields[0]}"; then
+      if tree_sitter_direct_dependency_p "$ldd_name"; then
         direct_entry=true
       fi
     else
@@ -663,23 +683,15 @@ parse_ldd_tree_sitter_output() {
       fi
     fi
 
-    found_arrow=false
-    i=0
-    while [ "$i" -lt "${#fields[@]}" ]; do
-      if [ "${fields[$i]}" = "=>" ]; then
-        record_tree_sitter_token "ldd name" "${fields[0]}" "$direct_entry" false
-        if [ $((i + 1)) -lt "${#fields[@]}" ]; then
-          record_tree_sitter_token "ldd path" "${fields[$((i + 1))]}" \
-            "$direct_entry" "$direct_entry"
-        fi
-        found_arrow=true
-        break
+    if [[ "$line" == *"=>"* ]]; then
+      ldd_path=$(strip_ldd_address_suffix "${line#*=>}")
+      record_tree_sitter_token "ldd name" "$ldd_name" "$direct_entry" false
+      if [ -n "$ldd_path" ]; then
+        record_tree_sitter_token "ldd path" "$ldd_path" \
+          "$direct_entry" "$direct_entry"
       fi
-      i=$((i + 1))
-    done
-
-    if [ "$found_arrow" != true ]; then
-      record_tree_sitter_token "ldd entry" "${fields[0]}" \
+    else
+      record_tree_sitter_token "ldd entry" "$ldd_name" \
         "$direct_entry" "$direct_entry"
     fi
   done <<< "$output"

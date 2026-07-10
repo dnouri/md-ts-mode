@@ -40,6 +40,8 @@ jobs:
           emacs --version | head -1
           readelf -d "$(command -v emacs)" | grep tree-sitter || true
           ldd "$(command -v emacs)" | grep tree-sitter || true
+      - name: Runtime preflight probes
+        run: make runtime-probes
       - name: Install tree-sitter grammars
         run: |
           emacs --batch -Q --eval '(progn

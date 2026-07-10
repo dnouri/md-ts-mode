@@ -149,7 +149,7 @@ EOF
 chmod +x "$misleading_path_bin/ldd"
 
 supported_shim_bin=$probe_dir/supported-shim-bin
-supported_shim_lib=$probe_dir/custom-runtime/lib
+supported_shim_lib="$probe_dir/custom runtime/lib"
 mkdir -p "$supported_shim_bin" "$supported_shim_lib"
 cp "$fake_bin/emacs" "$supported_shim_bin/emacs"
 : >"$supported_shim_lib/libtree-sitter.so.0.22"
@@ -326,7 +326,7 @@ run_probe "unsupported plain emacs fails" fail \
 run_probe "misleading 0.25 path with 0.22 basename fails" fail \
   env PATH="$misleading_path_bin:$PATH" EMACS=emacs "$check_script"
 
-run_probe "neutral path setup shim with real 0.25 passes" pass \
+run_probe "space path setup shim with real 0.25 passes" pass \
   env PATH="$supported_shim_bin:$PATH" EMACS=emacs "$check_script"
 
 run_probe "unrelated 0.25 peer does not mask direct 0.22" fail \
