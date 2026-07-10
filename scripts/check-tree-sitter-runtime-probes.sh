@@ -343,7 +343,7 @@ run_probe() {
 
   set +e
   output=$(
-    unset SKIP_RUNTIME_CHECK MD_TS_SKIP_RUNTIME_CHECK
+    unset SKIP_RUNTIME_CHECK MD_TS_SKIP_RUNTIME_CHECK EMACS_BIN
     "$@" 2>&1
   )
   status=$?
