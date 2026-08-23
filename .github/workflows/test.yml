@@ -51,8 +51,10 @@ jobs:
                       (markdown-inline . ("https://github.com/tree-sitter-grammars/tree-sitter-markdown"
                                           "v0.4.1" "tree-sitter-markdown-inline/src"))
                       (python . ("https://github.com/tree-sitter/tree-sitter-python"
-                                 "v0.23.6")))))
-            (dolist (lang (quote (markdown markdown-inline python)))
+                                 "v0.23.6"))
+                      (html . ("https://github.com/tree-sitter/tree-sitter-html"
+                               "v0.23.2")))))
+            (dolist (lang (quote (markdown markdown-inline python html)))
               (treesit-install-language-grammar lang)
               (unless (treesit-language-available-p lang)
                 (error "Failed to install %s grammar" lang)))
