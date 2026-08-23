@@ -282,6 +282,41 @@ When COUNT is non-nil, return link artifact counts after fontification."
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(defun md-ts-bench--measure-mutation-one-char
+    (iterations text &optional anchor mutations)
+  "Measure per-mutation cost of one-character edits in a TEXT buffer.
+Prepare and fontify the buffer once, then time insert+delete pairs of
+a single character at ANCHOR (a search string; defaults to the middle
+of the buffer).  Each iteration performs MUTATIONS mutations (default
+20) and the returned times are per-mutation milliseconds."
+  (let ((buffer (generate-new-buffer " *md-ts-bench-mutation*"))
+        (pairs (max 1 (/ (or mutations 20) 2))))
+    (unwind-protect
+        (with-current-buffer buffer
+          (insert text)
+          (goto-char (point-min))
+          (md-ts-mode)
+          (font-lock-ensure (point-min) (point-max))
+          (if anchor
+              (progn
+                (goto-char (point-min))
+                (search-forward anchor)
+                (beginning-of-line)
+                (forward-char (min 10 (- (line-end-position)
+                                         (line-beginning-position)))))
+            (goto-char (+ (point-min)
+                          (/ (- (point-max) (point-min)) 2)))
+            (forward-line 0))
+          (mapcar (lambda (ms) (/ ms (* 2.0 pairs)))
+                  (md-ts-bench--measure
+                   iterations
+                   (lambda ()
+                     (dotimes (_ pairs)
+                       (insert "x")
+                       (delete-char -1))))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (defun md-ts-bench--emit-result (case-name op text item-count item-unit counts times)
   "Print one parseable-ish RESULT line for CASE-NAME and TIMES."
   (md-ts-bench--log
@@ -337,7 +372,13 @@ When COUNT is non-nil, return link artifact counts after fontification."
         ("parsed-refs-smoke" mode+font-lock
          ,(md-ts-bench--parsed-references-doc 2) 2 "references")
         ("mixed-chat-prose-smoke" mode+font-lock
-         ,(md-ts-bench--mixed-chat-prose-doc 2) 2 "threads"))
+         ,(md-ts-bench--mixed-chat-prose-doc 2) 2 "threads")
+        ("mixed-chat-prose-mutation-smoke" mutation-one-char
+         ,(md-ts-bench--mixed-chat-prose-doc 2) 8 "mutations"
+         "A deterministic mix of prose")
+        ("fence-body-mutation-smoke" mutation-one-char
+         ,(md-ts-bench--mixed-chat-prose-doc 10) 8 "mutations"
+         "curl 'https://code.example.invalid/010"))
     `(("plain-prose-800" mode+font-lock
        ,(md-ts-bench--plain-prose-doc 800) 800 "lines")
       ("bare-links-100" mode+font-lock
@@ -353,14 +394,22 @@ When COUNT is non-nil, return link artifact counts after fontification."
       ("parsed-refs-800" mode+font-lock
        ,(md-ts-bench--parsed-references-doc 800) 800 "references")
       ("mixed-chat-prose" mode+font-lock
-       ,(md-ts-bench--mixed-chat-prose-doc 100) 100 "threads"))))
+       ,(md-ts-bench--mixed-chat-prose-doc 100) 100 "threads")
+      ("mixed-chat-prose-mutation" mutation-one-char
+       ,(md-ts-bench--mixed-chat-prose-doc 100) 40 "mutations"
+       "A deterministic mix of prose")
+      ("fence-body-mutation" mutation-one-char
+       ,(md-ts-bench--mixed-chat-prose-doc 100) 40 "mutations"
+       "curl 'https://code.example.invalid/050"))))
 
 (defconst md-ts-bench--smoke-min-counts
   '(("plain-prose-smoke" :link-buttons 0 :bare-link-props 0 :static-targets 0)
     ("bare-links-smoke" :link-buttons 6 :bare-link-props 6 :static-targets 6)
     ("long-line-one-char-jit-smoke" :link-buttons 7 :bare-link-props 6 :static-targets 6)
     ("parsed-refs-smoke" :link-buttons 4)
-    ("mixed-chat-prose-smoke" :link-buttons 16 :bare-link-props 10 :static-targets 10))
+    ("mixed-chat-prose-smoke" :link-buttons 16 :bare-link-props 10 :static-targets 10)
+    ("mixed-chat-prose-mutation-smoke" :link-buttons 16 :bare-link-props 10 :static-targets 10)
+    ("fence-body-mutation-smoke" :link-buttons 60 :bare-link-props 40 :static-targets 40))
   "Minimum link artifact counts expected for deterministic smoke fixtures.")
 
 (defun md-ts-bench--validate-smoke-counts (case-name counts)
@@ -388,7 +437,7 @@ When COUNT is non-nil, return link artifact counts after fontification."
         (md-ts-bench--fontify-text
          "# Warmup\n\nText [x](https://example.com) https://example.org user@example.org\n")
         (dolist (case (md-ts-bench--cases))
-          (pcase-let ((`(,name ,op ,text ,items ,item-unit) case))
+          (pcase-let ((`(,name ,op ,text ,items ,item-unit . ,op-args) case))
             (md-ts-bench--log "CASE name=%s op=%s items=%d item_unit=%s lines=%d chars=%d"
                               name op items item-unit
                               (md-ts-bench--line-count text) (length text))
@@ -400,7 +449,11 @@ When COUNT is non-nil, return link artifact counts after fontification."
                               (lambda () (md-ts-bench--fontify-text text))))
                             ('jit-one-char
                              (md-ts-bench--measure-jit-one-char
-                              md-ts-bench-iterations text)))))
+                              md-ts-bench-iterations text))
+                            ('mutation-one-char
+                             (md-ts-bench--measure-mutation-one-char
+                              md-ts-bench-iterations text
+                              (car op-args) items)))))
               (md-ts-bench--validate-smoke-counts name counts)
               (md-ts-bench--emit-result name op text items item-unit
                                         counts times))))
