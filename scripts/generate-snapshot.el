@@ -1,4 +1,4 @@
-;;; generate-snapshot.el --- Generate face snapshot for fixture  -*- lexical-binding: t; -*-
+;;; generate-snapshot.el --- Generate face snapshot for current Emacs  -*- lexical-binding: t; -*-
 ;;
 ;; Usage:
 ;;   emacs --batch -Q -L . -L test \
@@ -6,7 +6,7 @@
 ;;     -l md-ts-mode-test \
 ;;     -l scripts/generate-snapshot.el
 ;;
-;; Writes test/fixture-faces.eld with the current fontification output.
+;; Writes the snapshot selected by `md-ts-test--snapshot-path'.
 
 (require 'md-ts-mode-test)
 
@@ -14,7 +14,7 @@
        (snapshot-path (md-ts-test--snapshot-path))
        (print-escape-newlines t))
   (with-temp-file snapshot-path
-    (insert ";; Face snapshot for test/fixture.md\n")
+    (insert ";; Face snapshot for test/fixture.md on this Emacs\n")
     (insert ";; Format: (TEXT FACE) — concatenating all TEXT values reconstructs the file\n")
     (insert ";; Regenerate with: make snapshot\n")
     (insert "(\n")

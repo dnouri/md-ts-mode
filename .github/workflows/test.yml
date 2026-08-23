@@ -8,7 +8,7 @@ jobs:
       fail-fast: false
       matrix:
         emacs: ['29.4', '30.2', 'snapshot']
-        tree-sitter-runtime: ['default', '0.25']
+        tree-sitter-runtime: ['0.25']
         include:
           - emacs: 'snapshot'
             tree-sitter-runtime: '0.26'
@@ -40,6 +40,8 @@ jobs:
           emacs --version | head -1
           readelf -d "$(command -v emacs)" | grep tree-sitter || true
           ldd "$(command -v emacs)" | grep tree-sitter || true
+      - name: Runtime preflight probes
+        run: make runtime-probes
       - name: Install tree-sitter grammars
         run: |
           emacs --batch -Q --eval '(progn
@@ -57,5 +59,11 @@ jobs:
             (message "All grammars installed successfully"))'
       - name: Byte-compile
         run: make compile
+      - name: Byte-compile tests
+        run: make compile-tests
+      - name: Byte-compile benchmark
+        run: make compile-benchmark
+      - name: Benchmark smoke
+        run: make perf-smoke
       - name: Run tests
         run: make test

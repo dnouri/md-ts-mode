@@ -8,6 +8,27 @@ ROOT=${3:-$PWD/.cache/tree-sitter-runtime/$VERSION}
 abi_version=${VERSION%.*}
 lib_name="libtree-sitter.so.${abi_version}"
 
+download_tree_sitter_archive() {
+  local version=$1
+  local output=$2
+  local tag="v$version"
+  local primary_url="https://github.com/tree-sitter/tree-sitter/archive/refs/tags/$tag.tar.gz"
+  local codeload_url="https://codeload.github.com/tree-sitter/tree-sitter/tar.gz/refs/tags/$tag"
+  local url
+
+  for url in "$primary_url" "$codeload_url"; do
+    rm -f "$output"
+    echo "setup-tree-sitter-runtime: fetching $url" >&2
+    if curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused "$url" -o "$output"; then
+      return 0
+    fi
+    echo "setup-tree-sitter-runtime: fetch failed for $url" >&2
+  done
+
+  echo "setup-tree-sitter-runtime: failed to download tree-sitter $tag" >&2
+  return 1
+}
+
 if [ ! -x "$EMACS_BIN" ]; then
   echo "setup-tree-sitter-runtime: Emacs binary not found: $EMACS_BIN" >&2
   exit 1
@@ -30,8 +51,7 @@ if [ ! -f "$lib_dir/$compat_name" ]; then
   mkdir -p "$ROOT/src" "$lib_dir"
   archive="$ROOT/src/tree-sitter-$VERSION.tar.gz"
   echo "setup-tree-sitter-runtime: downloading tree-sitter v$VERSION" >&2
-  curl -fsSL "https://github.com/tree-sitter/tree-sitter/archive/refs/tags/v$VERSION.tar.gz" \
-    -o "$archive"
+  download_tree_sitter_archive "$VERSION" "$archive"
   tar -xzf "$archive" -C "$ROOT/src"
   echo "setup-tree-sitter-runtime: building $lib_name" >&2
   make -C "$src_dir" clean >/dev/null 2>&1 || true

@@ -1,0 +1,14 @@
+#+title: Changelog
+
+* 0.4.0 (unreleased)
+
+- Add clickable Markdown document links: inline, reference, image,
+  autolink, bare URL/email, and reference-definition labels are
+  buttonized for =C-c C-o= and standard button activation.
+- Add safer hide-markup/link side-effect ownership and compatibility
+  coverage for Emacs 29, 30, and 31 tree-sitter range handling.
+- Add advisory document-link benchmark tooling for local review.
+
+* 0.3.0
+
+- Latest tagged release before clickable document-link support.
