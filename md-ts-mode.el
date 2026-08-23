@@ -1669,6 +1669,30 @@ steps before installing optional range settings."
         t)
     (treesit-query-error nil)))
 
+(defvar md-ts--compiled-query-cache nil
+  "Memoized tree-sitter queries keyed by (LANGUAGE . SEXP).
+Values are compiled queries from `treesit-query-compile', or the sexp
+itself when compilation raised `treesit-query-error', so grammars that
+reject the sexp keep the tolerant uncompiled path.  Entries are never
+invalidated; grammar upgrades take effect after restart, the same
+limitation as `treesit-font-lock-settings'.")
+
+(defun md-ts--memoized-query (language sexp)
+  "Return a memoized compiled query for LANGUAGE and SEXP.
+Compile SEXP once with `treesit-query-compile' and reuse the compiled
+query, which `treesit-query-capture' accepts with identical captures.
+When compilation raises `treesit-query-error', memoize and return SEXP
+itself, preserving tolerance for grammars that reject SEXP."
+  (let* ((key (cons language sexp))
+         (cached (assoc key md-ts--compiled-query-cache)))
+    (if cached
+        (cdr cached)
+      (let ((query (condition-case nil
+                       (treesit-query-compile language sexp)
+                     (treesit-query-error sexp))))
+        (push (cons key query) md-ts--compiled-query-cache)
+        query))))
+
 (defun md-ts--range-rules-if-query-supported (host-language query &rest args)
   "Return range rules from ARGS when HOST-LANGUAGE accepts QUERY.
 If the installed host grammar lacks optional node types in QUERY,
@@ -1802,9 +1826,11 @@ VALUE non-nil hides markup, nil shows it."
                  (md-ts--broadened-line-bounds beg end)))
       (when-let* ((root (ignore-errors (md-ts--buffer-root-node 'markdown))))
         (md-ts--with-base-buffer-widened
-          (treesit-query-capture root
-                                 '((link_reference_definition) @definition)
-                                 line-beg line-end))))))
+          (treesit-query-capture
+           root
+           (md-ts--memoized-query
+            'markdown '((link_reference_definition) @definition))
+           line-beg line-end))))))
 
 (defun md-ts--region-needs-adjacent-lines-p (beg end)
   "Return non-nil if BEG..END should inspect neighboring lines.
@@ -1843,9 +1869,11 @@ BOL/EOL edit gets the same conservative treatment."
                  (md-ts--fence-detection-line-bounds beg end)))
       (when-let* ((root (ignore-errors (md-ts--buffer-root-node 'markdown))))
         (md-ts--with-base-buffer-widened
-          (treesit-query-capture root
-                                 '((fenced_code_block_delimiter) @delimiter)
-                                 line-beg line-end))))))
+          (treesit-query-capture
+           root
+           (md-ts--memoized-query
+            'markdown '((fenced_code_block_delimiter) @delimiter))
+           line-beg line-end))))))
 
 (defun md-ts--region-has-markdown-fence-p (beg end)
   "Return non-nil for a Markdown fence near BEG and END.
@@ -1911,9 +1939,10 @@ force whole-buffer link refontification."
              (md-ts--region-touches-node-boundary-line-p
               (cdr capture) touch-beg touch-end))
            (md-ts--with-base-buffer-widened
-             (treesit-query-capture root
-                                    '((html_block) @block)
-                                    discover-beg discover-end))))))))
+             (treesit-query-capture
+              root
+              (md-ts--memoized-query 'markdown '((html_block) @block))
+              discover-beg discover-end))))))))
 
 (defun md-ts--flush-all-font-lock ()
   "Flush font-lock across the whole buffer, ignoring narrowing."
@@ -1921,19 +1950,83 @@ force whole-buffer link refontification."
     (widen)
     (font-lock-flush (point-min) (point-max))))
 
+(defconst md-ts--link-structure-line-regexp
+  (concat "\\]:"
+          "\\|`\\{3,\\}\\|~\\{3,\\}"
+          "\\|^[ \t]*\\(?:>[ \t]*\\|[-+*][ \t]+\\|[0-9]\\{1,9\\}[.)][ \t]+\\)*<"
+          "\\|-->\\|?>\\|\\]\\]>")
+  "Relaxed regexp for lines whose edit could change link structure.
+Matches definition-ish lines containing \"]:\", fence-ish lines with
+a run of three or more backticks or tildes, lines whose first
+non-whitespace character after optional container markers is \"<\",
+and lines with HTML comment, processing instruction, or CDATA closing
+tokens.  This deliberately over-approximates the parsed link-flush
+predicates: false positives only cost a tree check, while false
+negatives would skip needed whole-buffer flushes.")
+
+(defun md-ts--blank-line-delimited-block-bounds (beg end)
+  "Return line bounds of the blank-line-delimited block around BEG..END.
+Lines containing only whitespace delimit blocks.  The scan stops at
+the enclosing delimiters, so even pathological inputs stay cheap."
+  (save-excursion
+    (goto-char (min (max beg (point-min)) (point-max)))
+    (beginning-of-line)
+    (while (and (> (point) (point-min))
+                (save-excursion
+                  (forward-line -1)
+                  (not (looking-at-p "[ \t]*$"))))
+      (forward-line -1))
+    (let ((block-beg (point)))
+      (goto-char (min (max end (point-min)) (point-max)))
+      (end-of-line)
+      (while (and (< (point) (point-max))
+                  (save-excursion
+                    (forward-line 1)
+                    (not (looking-at-p "[ \t]*$"))))
+        (forward-line 1)
+        (end-of-line))
+      (cons block-beg (point)))))
+
+(defun md-ts--region-could-change-link-structure-p (beg end)
+  "Return non-nil when text around BEG..END could change link structure.
+Cheap text-only pre-filter for the parsed link-flush predicates,
+correct as a strict superset of the edits they can catch: trip when
+the fence-detection line bounds of BEG..END, or any line of the
+enclosing blank-line-delimited block, match
+`md-ts--link-structure-line-regexp'.  The block scan catches edits on
+continuation lines of multi-line constructs such as link reference
+definitions.  False positives only cost a tree predicate check;
+false negatives would skip needed whole-buffer flushes."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (pcase-let ((`(,line-beg . ,line-end)
+                   (md-ts--fence-detection-line-bounds beg end)))
+        (or (string-match-p
+             md-ts--link-structure-line-regexp
+             (buffer-substring-no-properties line-beg line-end))
+            (pcase-let ((`(,block-beg . ,block-end)
+                         (md-ts--blank-line-delimited-block-bounds
+                          line-beg line-end)))
+              (string-match-p
+               md-ts--link-structure-line-regexp
+               (buffer-substring-no-properties block-beg block-end))))))))
+
 (defun md-ts--before-change-check-link-reference-definition (beg end)
   "Remember if the text from BEG to END can affect definitions."
-  (let ((newline-delete (md-ts--region-contains-newline-p beg end)))
-    (setq md-ts--link-reference-definition-change-p
-          (or (md-ts--region-has-link-reference-definition-node-p beg end)
-              (md-ts--region-has-markdown-fence-p beg end)
-              (md-ts--region-touches-html-block-boundary-p
-               beg end newline-delete)
-              (md-ts--node-in-link-reference-definition-p
-               (md-ts--node-at beg 'markdown))
-              (and (> end beg)
-                   (md-ts--node-in-link-reference-definition-p
-                    (md-ts--node-at (1- end) 'markdown)))))))
+  (if (not (md-ts--region-could-change-link-structure-p beg end))
+      (setq md-ts--link-reference-definition-change-p nil)
+    (let ((newline-delete (md-ts--region-contains-newline-p beg end)))
+      (setq md-ts--link-reference-definition-change-p
+            (or (md-ts--region-has-link-reference-definition-node-p beg end)
+                (md-ts--region-has-markdown-fence-p beg end)
+                (md-ts--region-touches-html-block-boundary-p
+                 beg end newline-delete)
+                (md-ts--node-in-link-reference-definition-p
+                 (md-ts--node-at beg 'markdown))
+                (and (> end beg)
+                     (md-ts--node-in-link-reference-definition-p
+                      (md-ts--node-at (1- end) 'markdown))))))))
 
 (defun md-ts--after-change-flush-link-reference-links (beg end _length)
   "Flush non-local link fontification after definition edits.
@@ -1943,10 +2036,12 @@ far from the edited line, so real definition or fence changes flush
 all font-lock state."
   (let ((newline-insert (md-ts--region-contains-newline-p beg end)))
     (when (or md-ts--link-reference-definition-change-p
-              (md-ts--region-has-link-reference-definition-node-p beg end)
-              (md-ts--region-has-markdown-fence-p beg end)
-              (md-ts--region-touches-html-block-boundary-p
-               beg end newline-insert))
+              (and (md-ts--region-could-change-link-structure-p beg end)
+                   (or (md-ts--region-has-link-reference-definition-node-p
+                        beg end)
+                       (md-ts--region-has-markdown-fence-p beg end)
+                       (md-ts--region-touches-html-block-boundary-p
+                        beg end newline-insert))))
       (save-restriction
         (widen)
         (md-ts--font-lock-push-dirty-side-effect-bounds
@@ -3494,16 +3589,23 @@ Return non-nil when a modified-tick mismatch was found."
 
 (defun md-ts--font-lock-side-effect-node-queries ()
   "Return queries for nodes whose callbacks may write past requested bounds."
-  `((markdown . (,@(when (md-ts--hide-markup-enabled-p)
-                    '((fenced_code_block) @node))
-                 (link_reference_definition) @node))
-    (markdown-inline . ((inline_link) @node
-                        (image) @node
-                        (full_reference_link) @node
-                        (collapsed_reference_link) @node
-                        (shortcut_link) @node
-                        (uri_autolink) @node
-                        (email_autolink) @node))))
+  (list (cons 'markdown
+              (md-ts--memoized-query
+               'markdown
+               (if (md-ts--hide-markup-enabled-p)
+                   '((fenced_code_block) @node
+                     (link_reference_definition) @node)
+                 '((link_reference_definition) @node))))
+        (cons 'markdown-inline
+              (md-ts--memoized-query
+               'markdown-inline
+               '((inline_link) @node
+                 (image) @node
+                 (full_reference_link) @node
+                 (collapsed_reference_link) @node
+                 (shortcut_link) @node
+                 (uri_autolink) @node
+                 (email_autolink) @node)))))
 
 (defconst md-ts--font-lock-bare-unsafe-context-node-type-specs
   '((markdown . (fenced_code_block indented_code_block html_block))
@@ -3513,10 +3615,13 @@ Return non-nil when a modified-tick mismatch was found."
     (markdown-inline . (code_span html_tag)))
   "Multi-line unsafe-context node types that can enclose bare UI.")
 
-(defconst md-ts--font-lock-bare-unsafe-context-node-queries
-  (md-ts--treesit-query-specs-for-node-types
-   md-ts--font-lock-bare-unsafe-context-node-type-specs '@node)
-  "Queries for multi-line nodes that can make existing bare UI unsafe.")
+(defun md-ts--font-lock-bare-unsafe-context-node-queries ()
+  "Return queries for multi-line nodes that can make existing bare UI unsafe."
+  (mapcar (lambda (spec)
+            (cons (car spec)
+                  (md-ts--memoized-query (car spec) (cdr spec))))
+          (md-ts--treesit-query-specs-for-node-types
+           md-ts--font-lock-bare-unsafe-context-node-type-specs '@node)))
 
 (defun md-ts--font-lock-line-fontify-bounds (beg end)
   "Return line-based fontification bounds covering BEG through END."
@@ -3761,7 +3866,7 @@ touched by the change bounds."
          fontify-beg fontify-end (md-ts--font-lock-side-effect-node-queries))
         (md-ts--font-lock-record-stale-node-bounds
          fontify-beg fontify-end
-         md-ts--font-lock-bare-unsafe-context-node-queries t)))))
+         (md-ts--font-lock-bare-unsafe-context-node-queries) t)))))
 
 (defun md-ts--font-lock-record-dirty-side-effect-bounds (beg end &rest args)
   "Record changed line bounds BEG..END for later side-effect cleanup.
@@ -3816,7 +3921,7 @@ mutate outside the bounds reported to jit-lock."
             (dolist (expansion
                      (list (cons (md-ts--font-lock-side-effect-node-queries)
                                  nil)
-                           (cons md-ts--font-lock-bare-unsafe-context-node-queries
+                           (cons (md-ts--font-lock-bare-unsafe-context-node-queries)
                                  t)))
               (pcase-let ((`(,expanded-beg . ,expanded-end)
                            (md-ts--font-lock-expanded-node-bounds

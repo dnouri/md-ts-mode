@@ -2585,6 +2585,183 @@ inline parser ranges cause the first range's faces to be dropped."
                            "https://live.example"))))
       (kill-buffer buf))))
 
+(defvar md-ts-test--inside-link-flush-hook nil
+  "Non-nil while the link-flush change hooks run in tests.")
+
+(ert-deftest md-ts-test-link-reference-prose-edit-runs-no-hook-queries ()
+  "Ordinary prose edits should run no tree queries in the flush hooks."
+  (let ((buf (md-ts-test--fontify
+              (concat "Plain prose line one.\n"
+                      "Plain prose line two.\n\n"
+                      "See [Doc][id].\n\n"
+                      "[id]: https://example.com\n")))
+        (original-before
+         (symbol-function 'md-ts--before-change-check-link-reference-definition))
+        (original-after
+         (symbol-function 'md-ts--after-change-flush-link-reference-links))
+        (original-capture (symbol-function 'treesit-query-capture))
+        (original-flush (symbol-function 'font-lock-flush))
+        (md-ts-test--inside-link-flush-hook nil)
+        (hook-queries 0)
+        full-flushes)
+    (unwind-protect
+        (cl-letf (((symbol-function 'md-ts--before-change-check-link-reference-definition)
+                   (lambda (beg end)
+                     (let ((md-ts-test--inside-link-flush-hook t))
+                       (funcall original-before beg end))))
+                  ((symbol-function 'md-ts--after-change-flush-link-reference-links)
+                   (lambda (beg end length)
+                     (let ((md-ts-test--inside-link-flush-hook t))
+                       (funcall original-after beg end length))))
+                  ((symbol-function 'treesit-query-capture)
+                   (lambda (&rest args)
+                     (when md-ts-test--inside-link-flush-hook
+                       (setq hook-queries (1+ hook-queries)))
+                     (apply original-capture args)))
+                  ((symbol-function 'font-lock-flush)
+                   (lambda (&optional beg end)
+                     (when (and (equal beg (point-min))
+                                (equal end (point-max)))
+                       (push t full-flushes))
+                     (funcall original-flush beg end))))
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (search-forward "Plain prose line one.")
+            (ert-info ("Prose insert runs no link-flush hook queries")
+              (insert "x")
+              (should (= 0 hook-queries))
+              (should-not full-flushes))
+            (ert-info ("Prose delete runs no link-flush hook queries")
+              (delete-char -1)
+              (should (= 0 hook-queries))
+              (should-not full-flushes))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-multiline-continuation-edit-flushes ()
+  "Editing a definition continuation line should flush stale link props."
+  (let ((buf (md-ts-test--fontify
+              (concat "See [Doc][id].\n\n"
+                      "[id]: https://old.example\n"
+                      "    \"Old title\"\n")))
+        (original-flush (symbol-function 'font-lock-flush))
+        full-flushes)
+    (unwind-protect
+        (cl-letf (((symbol-function 'font-lock-flush)
+                   (lambda (&optional beg end)
+                     (when (and (equal beg (point-min))
+                                (equal end (point-max)))
+                       (push t full-flushes))
+                     (funcall original-flush beg end))))
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (search-forward "Old title")
+            (ert-info ("Title-line edit reaches the enclosing definition")
+              (replace-match "New title")
+              (should full-flushes))
+            (font-lock-ensure)
+            (ert-info ("Reference still resolves after the title edit")
+              (should (equal (md-ts--resolve-link-reference "[id]")
+                             "https://old.example")))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-unindent-definition-line-flushes ()
+  "Un-indenting an indented definition-looking line should flush."
+  (let ((buf (md-ts-test--fontify
+              (concat "See [Doc][id].\n\n"
+                      "    [id]: https://new.example\n")))
+        (original-flush (symbol-function 'font-lock-flush))
+        full-flushes)
+    (unwind-protect
+        (cl-letf (((symbol-function 'font-lock-flush)
+                   (lambda (&optional beg end)
+                     (when (and (equal beg (point-min))
+                                (equal end (point-max)))
+                       (push t full-flushes))
+                     (funcall original-flush beg end))))
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (search-forward "[id]:")
+            (ert-info ("Un-indenting creates a definition and flushes")
+              (beginning-of-line)
+              (delete-char 4)
+              (should full-flushes))
+            (should (equal (md-ts--resolve-link-reference "[id]")
+                           "https://new.example"))
+            (font-lock-ensure)
+            (ert-info ("Reference link becomes a button after the flush")
+              (goto-char (point-min))
+              (search-forward "Doc")
+              (should (button-at (match-beginning 0)))
+              (should (equal (get-text-property (match-beginning 0) 'help-echo)
+                             "https://new.example")))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-indent-definition-into-code-flushes ()
+  "Indenting a real definition into indented code should flush."
+  (let ((buf (md-ts-test--fontify
+              (concat "See [Doc][id].\n\n"
+                      "[id]: https://old.example\n")))
+        (original-flush (symbol-function 'font-lock-flush))
+        full-flushes)
+    (unwind-protect
+        (cl-letf (((symbol-function 'font-lock-flush)
+                   (lambda (&optional beg end)
+                     (when (and (equal beg (point-min))
+                                (equal end (point-max)))
+                       (push t full-flushes))
+                     (funcall original-flush beg end))))
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (search-forward "Doc")
+            (should (button-at (match-beginning 0)))
+            (goto-char (point-min))
+            (search-forward "[id]:")
+            (ert-info ("Indenting destroys the definition and flushes")
+              (beginning-of-line)
+              (insert "    ")
+              (should full-flushes))
+            (should-not (md-ts--resolve-link-reference "[id]"))
+            (font-lock-ensure)
+            (ert-info ("Reference link loses its button after the flush")
+              (goto-char (point-min))
+              (search-forward "Doc")
+              (should-not (button-at (match-beginning 0))))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-fence-adjacent-edit-does-not-flush ()
+  "Editing prose adjacent to an untouched fence should not flush links."
+  (let ((buf (md-ts-test--fontify
+              (concat "See [Doc][id].\n\n"
+                      "prose line above the fence\n"
+                      "```sh\n"
+                      "curl https://code.example\n"
+                      "```\n\n"
+                      "[id]: https://live.example\n")))
+        (original-flush (symbol-function 'font-lock-flush))
+        full-flushes)
+    (unwind-protect
+        (cl-letf (((symbol-function 'font-lock-flush)
+                   (lambda (&optional beg end)
+                     (when (and (equal beg (point-min))
+                                (equal end (point-max)))
+                       (push t full-flushes))
+                     (funcall original-flush beg end))))
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (search-forward "prose line")
+            (forward-char 4)
+            (ert-info ("Edit beside an untouched fence does not flush")
+              (insert "x")
+              (should-not full-flushes))
+            (font-lock-ensure)
+            (ert-info ("Reference link keeps its button and target")
+              (goto-char (point-min))
+              (search-forward "Doc")
+              (should (button-at (match-beginning 0)))
+              (should (equal (get-text-property (match-beginning 0) 'help-echo)
+                             "https://live.example")))))
+      (kill-buffer buf))))
+
 (ert-deftest md-ts-test-link-collapsed-reference-button ()
   "Collapsed reference links should use their link text as the label."
   (let (opened)
@@ -7658,6 +7835,91 @@ we still expect the historical failure until upstream is corrected."
                (signal 'treesit-query-error '("bad node")))))
     (should-not (md-ts--front-matter-range-settings
                  'yaml '((minus_metadata) @yaml)))))
+
+(ert-deftest md-ts-test-side-effect-node-queries-are-precompiled ()
+  "Side-effect query producers should return memoized compiled queries."
+  (skip-unless (and (treesit-ready-p 'markdown t)
+                    (treesit-ready-p 'markdown-inline t)))
+  (let ((md-ts--compiled-query-cache nil))
+    (ert-info ("Side-effect node queries compile for both hide-markup variants")
+      (dolist (hide '(nil t))
+        (let ((md-ts-hide-markup hide))
+          (dolist (spec (md-ts--font-lock-side-effect-node-queries))
+            (should (treesit-compiled-query-p (cdr spec)))
+            (should (eq (treesit-query-language (cdr spec)) (car spec)))))))
+    (ert-info ("Bare-unsafe context queries compile or fall back per spec")
+      (let ((specs (md-ts--font-lock-bare-unsafe-context-node-queries)))
+        (should (= 4 (length specs)))
+        (dolist (spec specs)
+          (if (treesit-compiled-query-p (cdr spec))
+              (should (eq (treesit-query-language (cdr spec)) (car spec)))
+            ;; Optional front matter node types may be missing from older
+            ;; grammars; those specs keep the tolerant sexp fallback.
+            (should (memq (car spec) '(markdown markdown-inline))))))
+      (let ((core (md-ts--treesit-query-specs-for-node-types
+                   '((markdown . (fenced_code_block indented_code_block
+                                  html_block))
+                     (markdown-inline . (code_span html_tag)))
+                   '@node)))
+        (dolist (spec core)
+          (let ((query (md-ts--memoized-query (car spec) (cdr spec))))
+            (should (treesit-compiled-query-p query))
+            (should (eq (treesit-query-language query) (car spec)))))))
+    (ert-info ("Compiled queries capture identically to sexps")
+      (let ((buf (md-ts-test--fontify
+                  "See [Doc][id].\n\n[id]: https://x.example\n")))
+        (unwind-protect
+            (with-current-buffer buf
+              (let* ((sexp '((link_reference_definition) @definition))
+                     (compiled (md-ts--memoized-query 'markdown sexp))
+                     (root (treesit-buffer-root-node 'markdown)))
+                (should (treesit-compiled-query-p compiled))
+                (should (equal (treesit-query-capture root sexp)
+                               (treesit-query-capture root compiled)))))
+          (kill-buffer buf))))))
+
+(ert-deftest md-ts-test-memoized-query-falls-back-to-sexp-on-query-error ()
+  "Query compilation failures should fall back to memoized sexp queries."
+  (skip-unless (treesit-ready-p 'markdown t))
+  (let ((md-ts--compiled-query-cache nil)
+        (buf (md-ts-test--fontify
+              "See [Doc][id].\n\n[id]: https://x.example\n"))
+        (compiles 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'treesit-query-compile)
+                   (lambda (&rest _args)
+                     (setq compiles (1+ compiles))
+                     (signal 'treesit-query-error '("bad node")))))
+          (ert-info ("Memoized query falls back to the sexp")
+            (should (equal (md-ts--memoized-query
+                            'markdown '((link_reference_definition) @definition))
+                           '((link_reference_definition) @definition)))
+            (should (= 1 compiles)))
+          (ert-info ("Fallback is memoized")
+            (should (equal (md-ts--memoized-query
+                            'markdown '((link_reference_definition) @definition))
+                           '((link_reference_definition) @definition)))
+            (should (= 1 compiles)))
+          (ert-info ("Query producers return usable sexp specs")
+            (should (equal (md-ts--font-lock-side-effect-node-queries)
+                           '((markdown . ((link_reference_definition) @node))
+                             (markdown-inline . ((inline_link) @node
+                                                 (image) @node
+                                                 (full_reference_link) @node
+                                                 (collapsed_reference_link) @node
+                                                 (shortcut_link) @node
+                                                 (uri_autolink) @node
+                                                 (email_autolink) @node)))))
+            (dolist (spec (md-ts--font-lock-bare-unsafe-context-node-queries))
+              (should (consp spec))
+              (should (listp (cdr spec)))))
+          (ert-info ("Tree predicates still capture through the sexp fallback")
+            (with-current-buffer buf
+              (goto-char (point-min))
+              (search-forward "[id]:")
+              (should (md-ts--region-has-link-reference-definition-node-p
+                       (line-beginning-position) (line-end-position))))))
+      (kill-buffer buf))))
 
 (ert-deftest md-ts-test-refresh-local-parsers-ignores-non-md-ts-buffers ()
   "Global native range advice should not refresh non-md-ts buffers."
