@@ -41,6 +41,7 @@
 ;;; Code:
 
 (require 'treesit)
+(require 'cl-lib)
 (require 'button)
 (require 'browse-url)
 (require 'url-mailto)
@@ -759,6 +760,20 @@ follow the base buffer's value."
   :safe #'booleanp
   :group 'md-ts)
 
+(defcustom md-ts-strict-strikethrough nil
+  "Non-nil means only double-tilde (~~) spans render as strikethrough.
+The tree-sitter-markdown grammar emits strikethrough nodes for
+single-tilde pairs like ~x~ as well, so lone tildes in prose (home
+directory paths like ~/foo, or ranges like 1~2) can pick up
+strikes between them.  GFM renderers such as cmark-gfm do accept
+single tildes, so the default keeps them.  Enable this to render
+only ~~x~~ as strikethrough and leave ~x~ as plain text, matching
+strict renderers such as the pi coding agent's TUI.
+Existing buffers need refontification after changing this."
+  :type 'boolean
+  :safe #'booleanp
+  :group 'md-ts)
+
 (defcustom md-ts-heading-scaling nil
   "Whether to use variable-height faces for headings.
 When non-nil, the scaling values in `md-ts-heading-scaling-values'
@@ -931,6 +946,54 @@ OVERRIDE, START, and END are passed to `treesit-fontify-with-override'."
                     (string-prefix-p "setext_h" type))
             (setq hide-end (min (1+ hide-end) (point-max))))
           (md-ts--add-markup-invisible-property node-start hide-end))))))
+
+(defun md-ts--strict-strikethrough-p (node)
+  "Return non-nil if strikethrough NODE is delimited by exactly two tildes.
+The grammar emits one `~' emphasis delimiter per tilde character,
+so ~~x~~ nests a single-tilde strikethrough inside a double-tilde
+one, and ~~~x~~~ nests one whose own text also starts with two
+tildes.  Only the outermost node of a tilde run can be judged by
+its text, since nothing tilde-like can precede or follow the run:
+check nesting first, then the tilde runs around NODE's text."
+  (and (not (equal "strikethrough"
+                   (treesit-node-type (treesit-node-parent node))))
+       (let ((text (treesit-node-text node t)))
+         (and (string-match "\\`~+" text)
+              (= 2 (- (match-end 0) (match-beginning 0)))
+              (string-match "~+\\'" text)
+              (= 2 (- (match-end 0) (match-beginning 0)))))))
+
+(defun md-ts--plain-tilde-delimiter-p (node)
+  "Return non-nil if tilde delimiter NODE belongs to no strict strikethrough.
+A single-tilde strikethrough that `md-ts-strict-strikethrough'
+rejects renders as plain text.  Delimiters nested inside a
+double-tilde strikethrough are part of its ~~ markup, so look at
+all strikethrough ancestors, not just the direct parent."
+  (and (string= (treesit-node-text node t) "~")
+       (cl-loop for parent = (treesit-node-parent node)
+                then (treesit-node-parent parent)
+                while (and parent
+                           (string= (treesit-node-type parent)
+                                    "strikethrough"))
+                always (not (md-ts--strict-strikethrough-p parent)))))
+
+(defun md-ts--fontify-strikethrough (node override start end &rest _)
+  "Fontify strikethrough NODE, honoring `md-ts-strict-strikethrough'.
+OVERRIDE, START, and END are passed to `treesit-fontify-with-override'."
+  (when (or (not md-ts-strict-strikethrough)
+            (md-ts--strict-strikethrough-p node))
+    (treesit-fontify-with-override
+     (treesit-node-start node) (treesit-node-end node)
+     'md-ts-strikethrough override start end)))
+
+(defun md-ts--fontify-emphasis-delimiter (node override start end &rest _)
+  "Fontify inline emphasis delimiter NODE.
+Tilde delimiters that `md-ts-strict-strikethrough' rejects are left
+as plain text; see `md-ts--fontify-delimiter' for the rest.
+OVERRIDE, START, and END are passed to `treesit-fontify-with-override'."
+  (unless (and md-ts-strict-strikethrough
+               (md-ts--plain-tilde-delimiter-p node))
+    (md-ts--fontify-delimiter node override start end)))
 
 (defun md-ts--fontify-thematic-break (node override start end &rest _)
   "Fontify thematic break NODE as a horizontal rule.
@@ -1549,7 +1612,7 @@ OVERRIDE, START, and END are passed to `treesit-fontify-with-override'."
      ((code_span_delimiter) @md-ts--fontify-delimiter)
      ((emphasis) @italic)
      ((strong_emphasis) @bold)
-     ((strikethrough) @md-ts-strikethrough)
+     ((strikethrough) @md-ts--fontify-strikethrough)
      (inline_link (link_text) @md-ts--fontify-link-text)
      (image (image_description) @md-ts--fontify-link-text)
      (shortcut_link (link_text) @md-ts--fontify-link-text)
@@ -1562,7 +1625,7 @@ OVERRIDE, START, and END are passed to `treesit-fontify-with-override'."
    :language 'markdown-inline
    :feature 'paragraph-inline
    :override 'append
-   '((emphasis_delimiter) @md-ts--fontify-delimiter)))
+   '((emphasis_delimiter) @md-ts--fontify-emphasis-delimiter)))
 
 ;;; Imenu
 

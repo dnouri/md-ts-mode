@@ -665,6 +665,89 @@ This allows themes to provide their own heading heights."
                  "~~")
                 'md-ts--markup))))
 
+(ert-deftest md-ts-test-strict-strikethrough-single-tilde-not-struck ()
+  "With strict strikethrough, ~x~ stays plain text."
+  (let ((md-ts-strict-strikethrough t))
+    (should-not (md-ts-test--has-face
+                 "Values ~sub~ here.\n" "sub" 'md-ts-strikethrough))))
+
+(ert-deftest md-ts-test-strict-strikethrough-range-notation-not-struck ()
+  "With strict strikethrough, lone tildes must not strike between them."
+  (let ((md-ts-strict-strikethrough t))
+    (should-not (md-ts-test--has-face
+                 "Ranges 1~2 and 3~4 overlap.\n" "2 and 3" 'md-ts-strikethrough))))
+
+(ert-deftest md-ts-test-strict-strikethrough-double-tilde-struck ()
+  "With strict strikethrough, ~~x~~ is still struck."
+  (let ((md-ts-strict-strikethrough t))
+    (should (md-ts-test--has-face
+             "Normal ~~deleted~~ text.\n" "deleted" 'md-ts-strikethrough))))
+
+(ert-deftest md-ts-test-strict-strikethrough-triple-run-not-struck ()
+  "With strict strikethrough, ~~~x~~~ runs stay plain, like cmark-gfm."
+  (let ((md-ts-strict-strikethrough t))
+    (should-not (md-ts-test--has-face
+                 "Triple ~~~x~~~ run.\n" "x~" 'md-ts-strikethrough))))
+
+(ert-deftest md-ts-test-strict-strikethrough-in-list ()
+  "In lists, ~~x~~ strikes but ~x~ does not, under strict mode."
+  (let ((md-ts-strict-strikethrough t))
+    (should (md-ts-test--has-face
+             "- ~~removed~~ and ~gone~ stay\n" "removed" 'md-ts-strikethrough))
+    (should-not (md-ts-test--has-face
+                 "- ~~removed~~ and ~gone~ stay\n" "gone" 'md-ts-strikethrough))))
+
+(ert-deftest md-ts-test-strict-strikethrough-hides-only-strict-delimiters ()
+  "Hide-markup hides ~~ but keeps rejected single-tilde delimiters visible."
+  (let ((md-ts-strict-strikethrough t)
+        (md-ts-hide-markup t))
+    (should (eq (md-ts-test--invisible-at
+                 "Normal ~~deleted~~ text.\n" "~~")
+                'md-ts--markup))
+    (should (eq (md-ts-test--invisible-at
+                 "Values ~sub~ here.\n" "~")
+                nil))))
+
+(ert-deftest md-ts-test-strict-strikethrough-multiline-still-struck ()
+  "Strict ~~ spans across a soft line break are still struck."
+  (let ((md-ts-strict-strikethrough t))
+    (should (md-ts-test--has-face
+             "~~two\nlines~~ gone\n" "lines" 'md-ts-strikethrough))))
+
+(ert-deftest md-ts-test-permissive-strikethrough-single-tilde-struck ()
+  "By default single tildes strike, per GFM (cmark-gfm accepts them)."
+  (should (md-ts-test--has-face
+           "Values ~sub~ here.\n" "sub" 'md-ts-strikethrough)))
+
+(ert-deftest md-ts-test-strict-strikethrough-multibyte ()
+  "Strict mode places faces correctly after multibyte characters."
+  (let ((md-ts-strict-strikethrough t))
+    (should (md-ts-test--has-face
+             "é ~~déjà~~ fin ~ç~ end\n" "déjà" 'md-ts-strikethrough))
+    (should-not (md-ts-test--has-face
+                 "é ~~déjà~~ fin ~ç~ end\n" "ç" 'md-ts-strikethrough))))
+
+(ert-deftest md-ts-test-strict-strikethrough-escaped-tilde-plain ()
+  "Strict mode leaves escaped \~x\~ and neighbors untouched."
+  (let ((md-ts-strict-strikethrough t))
+    (should-not (md-ts-test--has-face
+                 "Escaped \\~x\\~ and ~~y~~\n" "x" 'md-ts-strikethrough))))
+
+(ert-deftest md-ts-test-strict-strikethrough-code-span-protects-tildes ()
+  "Tildes inside a code span are never struck, under strict mode."
+  (let ((md-ts-strict-strikethrough t))
+    (should (md-ts-test--has-face
+             "Code `~x~` span\n" "~x~" 'md-ts-code))
+    (should-not (md-ts-test--has-face
+                 "Code `~x~` span\n" "~x~" 'md-ts-strikethrough))))
+
+(ert-deftest md-ts-test-strict-strikethrough-in-table-cell ()
+  "Single tildes in table cells stay plain under strict mode."
+  (let ((md-ts-strict-strikethrough t))
+    (should-not (md-ts-test--has-face
+                 "| ~d~ | e |\n|---|---|\n| f | g |\n"
+                 "~d~" 'md-ts-strikethrough))))
+
 (ert-deftest md-ts-test-bold-in-blockquote-after-setext ()
   "Bold text in blockquote after setext heading should get bold face."
   (should (md-ts-test--has-face
