@@ -2,6 +2,12 @@
 
 * 0.4.0 (unreleased)
 
+- Only double-tilde (=~~x~~=) spans render as strikethrough, via the
+  new =md-ts-strict-strikethrough= (on by default): single-tilde
+  spans (=~x~=) stay plain text, so lone tildes in prose (=~/foo=,
+  =1~2=) no longer pick up strikes between them, matching strict
+  renderers such as the pi coding agent's TUI.  Set it to nil to
+  restore GFM behavior, where cmark-gfm accepts single tildes.
 - Add clickable Markdown document links: inline, reference, image,
   autolink, bare URL/email, and reference-definition labels are
   buttonized for =C-c C-o= and standard button activation.
