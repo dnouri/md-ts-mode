@@ -12,4 +12,4 @@
 <!--      ^ md-ts-heading-6 -->
 
 Text ~~struck~~ text
-<!--    ^ (md-ts-strikethrough md-ts-strikethrough) -->
+<!--    ^ md-ts-strikethrough -->

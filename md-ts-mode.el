@@ -760,16 +760,14 @@ follow the base buffer's value."
   :safe #'booleanp
   :group 'md-ts)
 
-(defcustom md-ts-strict-strikethrough nil
+(defcustom md-ts-strict-strikethrough t
   "Non-nil means only double-tilde (~~) spans render as strikethrough.
-The tree-sitter-markdown grammar emits strikethrough nodes for
-single-tilde pairs like ~x~ as well, so lone tildes in prose (home
-directory paths like ~/foo, or ranges like 1~2) can pick up
-strikes between them.  GFM renderers such as cmark-gfm do accept
-single tildes, so the default keeps them.  Enable this to render
-only ~~x~~ as strikethrough and leave ~x~ as plain text, matching
-strict renderers such as the pi coding agent's TUI.
-Existing buffers need refontification after changing this."
+Single-tilde spans like ~x~ stay plain text.  The tree-sitter-markdown
+grammar emits strikethrough nodes for single-tilde pairs as well, so
+when nil, lone tildes in prose (home directory paths like ~/foo, or
+ranges like 1~2) can pick up strikes between them.  GFM renderers
+such as cmark-gfm do accept single tildes; set this to nil to match
+them.  Existing buffers need refontification after changing this."
   :type 'boolean
   :safe #'booleanp
   :group 'md-ts)

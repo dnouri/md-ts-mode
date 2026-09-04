@@ -715,9 +715,10 @@ This allows themes to provide their own heading heights."
              "~~two\nlines~~ gone\n" "lines" 'md-ts-strikethrough))))
 
 (ert-deftest md-ts-test-permissive-strikethrough-single-tilde-struck ()
-  "By default single tildes strike, per GFM (cmark-gfm accepts them)."
-  (should (md-ts-test--has-face
-           "Values ~sub~ here.\n" "sub" 'md-ts-strikethrough)))
+  "With strict strikethrough off, single tildes strike per GFM."
+  (let ((md-ts-strict-strikethrough nil))
+    (should (md-ts-test--has-face
+             "Values ~sub~ here.\n" "sub" 'md-ts-strikethrough))))
 
 (ert-deftest md-ts-test-strict-strikethrough-multibyte ()
   "Strict mode places faces correctly after multibyte characters."
