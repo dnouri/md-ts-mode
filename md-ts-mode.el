@@ -484,10 +484,16 @@ If BEG and END are non-nil, only update ranges in that region."
                          `((,(point-min) . ,(point-min))))))))))))
     (treesit--cleanup-local-range-overlays modified-tick beg end))))
 
-;; Alias all Emacs 31 range infrastructure shims.  The guard checks
-;; for a function that only exists in Emacs 31; on 29/30 all shims
-;; are installed.
-(unless (fboundp 'treesit-range-fn-exclude-children)
+;; Alias all Emacs 31 range infrastructure shims.  These functions
+;; all appear together in Emacs 31; on 29/30 none of them exist and
+;; the shims below are installed.  Checking the functions we call
+;; directly by name also lets package-lint see that the Emacs 31
+;; symbols used further down are guarded, so the package can keep
+;; declaring support for Emacs 29.1.
+(unless (and (fboundp 'treesit-ensure-installed)
+             (fboundp 'treesit-merge-font-lock-feature-list)
+             (fboundp 'treesit-query-range-by-language)
+             (fboundp 'treesit-range-fn-exclude-children))
   (dolist (pair `((treesit-ensure-installed
                    . md-ts--treesit-ensure-installed)
                   (treesit-merge-font-lock-feature-list
