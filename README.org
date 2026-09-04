@@ -12,9 +12,10 @@ Emacs 29, 30, and 31.
 ** Features
 
 - Syntax highlighting for headings (atx and setext), emphasis, strong
-  emphasis, strikethrough (=~~deleted~~=), code spans, links (inline,
-  full reference, collapsed reference, shortcut), images, block
-  quotes, list markers, and indented code blocks.
+  emphasis, strikethrough (=~~deleted~~=; single tildes like =~x~= stay
+  plain unless ~md-ts-strict-strikethrough~ is nil), code spans, links
+  (inline, full reference, collapsed reference, shortcut), images,
+  block quotes, list markers, and indented code blocks.
 - Task list markers (=[ ]=, =[x]=) rendered as checkbox glyphs (☐, ☑).
 - Thematic breaks (=---=, =***=, =___=) rendered as horizontal rules.
 - Pipe tables with bold headers, subdued delimiter rows, and inline

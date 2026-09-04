@@ -581,7 +581,8 @@ This allows themes to provide their own heading heights."
 
 (ert-deftest md-ts-test-no-strikethrough-leak-across-paragraphs ()
   "Strikethrough must not leak across paragraph boundaries."
-  (let ((text "Time: ~1ms here.\n\nSpeed: ~2.3× faster.\n"))
+  (let ((md-ts-strict-strikethrough nil)
+        (text "Time: ~1ms here.\n\nSpeed: ~2.3× faster.\n"))
     (should-not (md-ts-test--has-face text "1ms" 'md-ts-strikethrough))
     (should-not (md-ts-test--has-face text "Speed" 'md-ts-strikethrough))))
 
@@ -713,6 +714,36 @@ This allows themes to provide their own heading heights."
   (let ((md-ts-strict-strikethrough t))
     (should (md-ts-test--has-face
              "~~two\nlines~~ gone\n" "lines" 'md-ts-strikethrough))))
+
+(ert-deftest md-ts-test-strict-strikethrough-default ()
+  "Strict strikethrough must be the default (see CHANGELOG 0.4.0)."
+  (should (eq (default-value 'md-ts-strict-strikethrough) t)))
+
+(ert-deftest md-ts-test-strict-strikethrough-nested-double-tilde-struck ()
+  "A genuine ~~b~~ inside a rejected ~...~ span still strikes b."
+  (let ((md-ts-strict-strikethrough t))
+    (should (md-ts-test--has-face
+             "Wrap ~a ~~b~~ c~ now\n" "b" 'md-ts-strikethrough))
+    (should-not (md-ts-test--has-face
+                 "Wrap ~a ~~b~~ c~ now\n" "a" 'md-ts-strikethrough))))
+
+(ert-deftest md-ts-test-strict-strikethrough-multiline-edit-no-stale-face ()
+  "Editing one end of a multiline strike must refresh the whole span.
+Simulates jit fontification: after refontifying only the edited
+line, the far line's tildes must not keep stale strike markup."
+  (with-temp-buffer
+    (insert "x ~~a\nb~~ y\n")
+    (md-ts-mode)
+    (font-lock-ensure)
+    (goto-char (point-min))
+    (search-forward "~~a")
+    (insert "~")                       ; line 1 becomes a 3-tilde run
+    (font-lock-fontify-region (point-min) (line-end-position))
+    (goto-char (point-min))
+    (search-forward "\nb")
+    (search-forward "~~")
+    (should-not (memq 'md-ts-strikethrough
+                      (get-text-property (- (point) 2) 'face)))))
 
 (ert-deftest md-ts-test-permissive-strikethrough-single-tilde-struck ()
   "With strict strikethrough off, single tildes strike per GFM."
@@ -7993,7 +8024,8 @@ we still expect the historical failure until upstream is corrected."
                                                  (collapsed_reference_link) @node
                                                  (shortcut_link) @node
                                                  (uri_autolink) @node
-                                                 (email_autolink) @node)))))
+                                                 (email_autolink) @node
+                                                 (strikethrough) @node)))))
             (dolist (spec (md-ts--font-lock-bare-unsafe-context-node-queries))
               (should (consp spec))
               (should (listp (cdr spec)))))

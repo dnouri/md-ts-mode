@@ -945,16 +945,29 @@ OVERRIDE, START, and END are passed to `treesit-fontify-with-override'."
             (setq hide-end (min (1+ hide-end) (point-max))))
           (md-ts--add-markup-invisible-property node-start hide-end))))))
 
+(defun md-ts--strikethrough-run-continuation-p (node)
+  "Return non-nil if NODE is an artifact of its parent's tilde run.
+~~x~~ parses as an outer strikethrough wrapping a single-tilde one,
+and ~~~x~~~ wraps several more: such inner nodes are artifacts of
+the one-delimiter-per-tilde grammar, not independent
+strikethroughs.  A parent wrapping NODE in exactly one tilde on
+each side marks NODE as such an artifact; any other parent means
+genuine nesting, like the ~~b~~ inside ~a ~~b~~ c~."
+  (let ((parent (treesit-node-parent node)))
+    (and (equal "strikethrough" (treesit-node-type parent))
+         (string= (treesit-node-text parent t)
+                  (concat "~" (treesit-node-text node t) "~")))))
+
 (defun md-ts--strict-strikethrough-p (node)
   "Return non-nil if strikethrough NODE is delimited by exactly two tildes.
 The grammar emits one `~' emphasis delimiter per tilde character,
-so ~~x~~ nests a single-tilde strikethrough inside a double-tilde
-one, and ~~~x~~~ nests one whose own text also starts with two
-tildes.  Only the outermost node of a tilde run can be judged by
-its text, since nothing tilde-like can precede or follow the run:
-check nesting first, then the tilde runs around NODE's text."
-  (and (not (equal "strikethrough"
-                   (treesit-node-type (treesit-node-parent node))))
+so the delimiter nodes alone cannot tell the shapes apart.  Judge
+strictness by the tilde runs around NODE's own text, but only when
+NODE is not an artifact of a longer parent run
+\(`md-ts--strikethrough-run-continuation-p'): artifacts start
+mid-run, and ~~~x~~~'s inner node's own text misleadingly looks
+like ~~x~~."
+  (and (not (md-ts--strikethrough-run-continuation-p node))
        (let ((text (treesit-node-text node t)))
          (and (string-match "\\`~+" text)
               (= 2 (- (match-end 0) (match-beginning 0)))
@@ -3672,7 +3685,11 @@ Return non-nil when a modified-tick mismatch was found."
                  (collapsed_reference_link) @node
                  (shortcut_link) @node
                  (uri_autolink) @node
-                 (email_autolink) @node)))))
+                 (email_autolink) @node
+                 ;; Strikethrough callbacks write invisible markup on
+                 ;; delimiter nodes and can flip strictness across a
+                 ;; multiline span when one end's tilde run is edited.
+                 (strikethrough) @node)))))
 
 (defconst md-ts--font-lock-bare-unsafe-context-node-type-specs
   '((markdown . (fenced_code_block indented_code_block html_block))
