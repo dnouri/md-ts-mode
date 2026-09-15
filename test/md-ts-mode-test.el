@@ -716,7 +716,7 @@ This allows themes to provide their own heading heights."
              "~~two\nlines~~ gone\n" "lines" 'md-ts-strikethrough))))
 
 (ert-deftest md-ts-test-strict-strikethrough-default ()
-  "Strict strikethrough must be the default (see CHANGELOG 0.4.0)."
+  "Strict strikethrough must be the default."
   (should (eq (default-value 'md-ts-strict-strikethrough) t)))
 
 (ert-deftest md-ts-test-strict-strikethrough-nested-double-tilde-struck ()
