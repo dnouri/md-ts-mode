@@ -102,6 +102,14 @@ NTH selects occurrence (default 1)."
   (should (eq (car result) 'jit-lock-bounds))
   (cons (cadr result) (cddr result)))
 
+(defun md-ts-test--dirty-bounds ()
+  "Return sorted shared dirty intervals as numeric bounds."
+  (sort (mapcar (lambda (range)
+                  (cons (marker-position (car range))
+                        (marker-position (cdr range))))
+                (md-ts--font-lock-dirty-side-effect-bounds))
+        (lambda (a b) (< (car a) (car b)))))
+
 (defun md-ts-test--property-outside-region (beg end props)
   "Return the first (POS . PROP) from PROPS outside BEG..END, or nil."
   (let ((pos (point-min))
@@ -7628,6 +7636,244 @@ text must not be hidden — only the fence lines themselves."
           (md-ts-toggle-hide-markup)
           (should (null md-ts-hide-markup))
           (should (not (memq 'md-ts--markup buffer-invisibility-spec))))
+      (kill-buffer buf))))
+
+;;; Shared font-lock dirty range tests
+
+(ert-deftest md-ts-test-dirty-range-full-dominates-and-detaches ()
+  "Repeated broad changes need one shared cleanup range, not many markers."
+  (with-temp-buffer
+    (insert (make-string 200 ?x))
+    (md-ts--font-lock-push-dirty-side-effect-bounds 50 60)
+    (md-ts--font-lock-push-dirty-side-effect-bounds 120 140)
+    (let ((older (md-ts--font-lock-dirty-side-effect-bounds)))
+      (md-ts--font-lock-push-full-dirty-side-effect-bounds)
+      (should (equal (md-ts-test--dirty-bounds) '((1 . 201))))
+      (dolist (range older)
+        (should-not (marker-buffer (car range)))
+        (should-not (marker-buffer (cdr range)))))
+    (let ((full (car (md-ts--font-lock-dirty-side-effect-bounds))))
+      (dotimes (_ 500)
+        (md-ts--font-lock-push-full-dirty-side-effect-bounds)
+        (md-ts--font-lock-push-dirty-side-effect-bounds 60 65))
+      (should (eq full (car (md-ts--font-lock-dirty-side-effect-bounds))))
+      (should (equal (md-ts-test--dirty-bounds) '((1 . 201))))
+      (should (equal (md-ts--font-lock-consume-dirty-side-effect-bounds 80 90)
+                     '((80 . 90)))))
+    (should (equal (md-ts-test--dirty-bounds)
+                   '((1 . 80) (90 . 201))))
+    (md-ts--font-lock-push-full-dirty-side-effect-bounds)
+    (should (equal (md-ts-test--dirty-bounds) '((1 . 201))))
+    (md-ts--font-lock-clear-side-effect-state)
+    (should-not (md-ts--font-lock-dirty-side-effect-bounds))))
+
+(ert-deftest md-ts-test-dirty-range-hot-overlap-and-periodic-union ()
+  "Merge a hot range immediately and old interleaved overlaps periodically."
+  (with-temp-buffer
+    (insert (make-string 5000 ?x))
+    (dotimes (i 128)
+      (if (zerop (% i 2))
+          (md-ts--font-lock-push-dirty-side-effect-bounds 21 28)
+        (md-ts--font-lock-push-dirty-side-effect-bounds 91 98)))
+    (should (equal (md-ts-test--dirty-bounds)
+                   '((21 . 28) (91 . 98))))
+    ;; The new hot range bridges an older one, not necessarily the head.
+    (md-ts--font-lock-push-dirty-side-effect-bounds 25 94)
+    (dotimes (i 126)
+      (let ((beg (+ 1000 (* i 3))))
+        (md-ts--font-lock-push-dirty-side-effect-bounds beg (1+ beg))))
+    (should (equal (car (md-ts-test--dirty-bounds)) '(21 . 98)))
+    (should (= (length (md-ts-test--dirty-bounds)) 127))
+    (md-ts--font-lock-clear-side-effect-state)))
+
+(ert-deftest md-ts-test-dirty-range-sweeps-follow-new-coverage ()
+  "Avoid sorting unchanged disjoint ranges repeatedly after regional cleanup."
+  (with-temp-buffer
+    (insert (make-string 2000 ?x))
+    (let ((sweeps 0)
+          (coalesce (symbol-function
+                     'md-ts--font-lock-coalesce-dirty-side-effect-bounds)))
+      (cl-letf (((symbol-function
+                  'md-ts--font-lock-coalesce-dirty-side-effect-bounds)
+                 (lambda ()
+                   (cl-incf sweeps)
+                   (funcall coalesce))))
+        ;; The first sweep leaves 128 genuinely disjoint ranges.  Cleaning
+        ;; and re-dirtying one must not sort all 128 ranges on every cycle.
+        (dotimes (i 128)
+          (let ((beg (+ 21 (* i 10))))
+            (md-ts--font-lock-push-dirty-side-effect-bounds beg (+ beg 2))))
+        (should (= sweeps 1))
+        (dotimes (_ 40)
+          (should (equal (md-ts--font-lock-consume-dirty-side-effect-bounds
+                          21 23)
+                         '((21 . 23))))
+          (md-ts--font-lock-push-dirty-side-effect-bounds 21 23))
+        (should (= sweeps 1))
+        (should (= (length (md-ts-test--dirty-bounds)) 128))
+        (should-not (md-ts--font-lock-consume-dirty-side-effect-bounds
+                     25 30)))
+      (md-ts--font-lock-clear-side-effect-state))))
+
+(ert-deftest md-ts-test-dirty-range-sweeps-after-most-regions-are-clean ()
+  "After regional cleanup, consolidate newly repeated edits promptly."
+  (with-temp-buffer
+    (insert (make-string 6000 ?x))
+    (dotimes (i 512)
+      (let ((beg (+ 21 (* i 10))))
+        (md-ts--font-lock-push-dirty-side-effect-bounds beg (+ beg 2))))
+    (should (= (length (md-ts-test--dirty-bounds)) 512))
+    ;; Clean all but 32 of the disjoint ranges, then repeatedly revisit
+    ;; two places in the cleaned portion without revisiting the survivors.
+    (md-ts--font-lock-consume-dirty-side-effect-bounds 1 4814)
+    (should (= (length (md-ts-test--dirty-bounds)) 32))
+    (dotimes (i 96)
+      (let ((beg (if (zerop (% i 2)) 21 91)))
+        (md-ts--font-lock-push-dirty-side-effect-bounds beg (+ beg 2))))
+    (should (= (length (md-ts-test--dirty-bounds)) 34))
+    (should-not (md-ts--font-lock-consume-dirty-side-effect-bounds 35 42))
+    (should (equal (sort (md-ts--font-lock-consume-dirty-side-effect-bounds
+                          1 100)
+                         (lambda (a b) (< (car a) (car b))))
+                   '((21 . 23) (91 . 93))))
+    (md-ts--font-lock-clear-side-effect-state)))
+
+(ert-deftest md-ts-test-dirty-range-sweeps-again-after-duplicates-collapse ()
+  "A large merge must not delay consolidation of fresh redundant ranges."
+  (with-temp-buffer
+    (insert (make-string 2000 ?x))
+    (let ((sweeps 0)
+          (coalesce (symbol-function
+                     'md-ts--font-lock-coalesce-dirty-side-effect-bounds)))
+      (cl-letf (((symbol-function
+                  'md-ts--font-lock-coalesce-dirty-side-effect-bounds)
+                 (lambda ()
+                   (cl-incf sweeps)
+                   (funcall coalesce))))
+        (dotimes (i 128)
+          (md-ts--font-lock-push-dirty-side-effect-bounds
+           (if (zerop (% i 2)) 21 91)
+           (if (zerop (% i 2)) 28 98)))
+        (should (= sweeps 1))
+        (should (= (length (md-ts-test--dirty-bounds)) 2))
+        (dotimes (i 126)
+          (md-ts--font-lock-push-dirty-side-effect-bounds
+           (if (zerop (% i 2)) 91 21)
+           (if (zerop (% i 2)) 98 28)))
+        (should (= sweeps 2))
+        (should (equal (md-ts-test--dirty-bounds)
+                       '((21 . 28) (91 . 98)))))
+      (md-ts--font-lock-clear-side-effect-state))))
+
+(ert-deftest md-ts-test-dirty-range-disjoint-edits-stay-precise ()
+  "Coalescing must not re-dirty clean gaps between many separate edits."
+  (with-temp-buffer
+    (insert (make-string 3000 ?x))
+    (dotimes (i 150)
+      (let ((beg (+ 21 (* i 10))))
+        (md-ts--font-lock-push-dirty-side-effect-bounds beg (+ beg 2))))
+    (should (= (length (md-ts-test--dirty-bounds)) 150))
+    (should-not (md-ts--font-lock-consume-dirty-side-effect-bounds 25 30))
+    (should (equal (md-ts--font-lock-consume-dirty-side-effect-bounds 21 23)
+                   '((21 . 23))))
+    (should-not (md-ts--font-lock-consume-dirty-side-effect-bounds 25 30))
+    (should (= (length (md-ts-test--dirty-bounds)) 149))
+    (should (member '(1511 . 1513) (md-ts-test--dirty-bounds)))
+    (md-ts--font-lock-clear-side-effect-state)))
+
+(ert-deftest md-ts-test-dirty-range-marker-edits-and-residuals ()
+  "Merged endpoints track edits, and partial fontification retains residues."
+  (with-temp-buffer
+    (insert (make-string 100 ?x))
+    (md-ts--font-lock-push-dirty-side-effect-bounds 21 31)
+    (md-ts--font-lock-push-dirty-side-effect-bounds 25 30)
+    (should (equal (md-ts-test--dirty-bounds) '((21 . 31))))
+    (goto-char 21)
+    (insert "X")
+    (goto-char 32)
+    (insert "Y")
+    (should (equal (md-ts-test--dirty-bounds) '((21 . 33))))
+    (delete-region 21 24)
+    (should (equal (md-ts-test--dirty-bounds) '((21 . 30))))
+    (should (equal (md-ts--font-lock-consume-dirty-side-effect-bounds 24 26)
+                   '((24 . 26))))
+    (should (equal (md-ts-test--dirty-bounds) '((21 . 24) (26 . 30))))
+    (md-ts--font-lock-clear-side-effect-state)))
+
+(ert-deftest md-ts-test-dirty-range-indirect-narrowed-full-state ()
+  "Full invalidation from a narrowed view covers and updates its base."
+  (let ((base (generate-new-buffer " *md-ts-dirty-base*"))
+        indirect)
+    (unwind-protect
+        (with-current-buffer base
+          (insert (make-string 100 ?x))
+          (md-ts--font-lock-push-dirty-side-effect-bounds 1 3)
+          (md-ts--font-lock-push-dirty-side-effect-bounds 75 80)
+          (let ((old (md-ts--font-lock-dirty-side-effect-bounds)))
+            (setq indirect
+                  (make-indirect-buffer base " *md-ts-dirty-indirect*" nil))
+            (narrow-to-region 40 80)
+            (with-current-buffer indirect
+              (narrow-to-region 20 41)
+              (md-ts--font-lock-push-full-dirty-side-effect-bounds)
+              (should (equal (md-ts-test--dirty-bounds) '((1 . 101))))
+              (md-ts--font-lock-push-dirty-side-effect-bounds 25 30)
+              (should (equal (md-ts-test--dirty-bounds) '((1 . 101))))
+              (should (equal (md-ts--font-lock-consume-dirty-side-effect-bounds
+                              90 95)
+                             '((90 . 95))))
+              (should (equal (md-ts-test--dirty-bounds)
+                             '((1 . 90) (95 . 101)))))
+            (dolist (range old)
+              (should-not (marker-buffer (car range)))
+              (should-not (marker-buffer (cdr range))))))
+      (when (buffer-live-p indirect)
+        (kill-buffer indirect))
+      (when (buffer-live-p base)
+        (kill-buffer base)))))
+
+(ert-deftest md-ts-test-dirty-range-coalescing-preserves-link-and-fence-cleanup ()
+  "Coalesced full dirty ranges still refresh distant links and hidden markup."
+  (let* ((md-ts-hide-markup t)
+         (buf (md-ts-test--fontify
+              "See [Doc][id].\n\n[id]: https://old.example\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "Doc")
+          (should (button-at (match-beginning 0)))
+          (dotimes (_ 150)
+            (md-ts--font-lock-push-full-dirty-side-effect-bounds))
+          (should (equal (md-ts-test--dirty-bounds)
+                         (list (cons (point-min) (point-max)))))
+          (goto-char (point-min))
+          (search-forward "[id]:")
+          (beginning-of-line)
+          (insert "```\n")
+          (goto-char (point-max))
+          (insert "```\n")
+          (font-lock-ensure)
+          (goto-char (point-min))
+          (search-forward "Doc")
+          (should-not (button-at (match-beginning 0)))
+          (should-not (get-text-property (match-beginning 0) 'help-echo))
+          (goto-char (point-min))
+          (search-forward "```")
+          (should (eq (get-text-property (match-beginning 0) 'invisible)
+                      'md-ts--markup))
+          (search-forward "```")
+          (delete-region (line-beginning-position)
+                         (min (point-max) (1+ (line-end-position))))
+          (goto-char (point-min))
+          (search-forward "```")
+          (delete-region (line-beginning-position)
+                         (min (point-max) (1+ (line-end-position))))
+          (font-lock-ensure)
+          (goto-char (point-min))
+          (search-forward "Doc")
+          (should (button-at (match-beginning 0)))
+          (should (equal (get-text-property (match-beginning 0) 'help-echo)
+                         "https://old.example")))
       (kill-buffer buf))))
 
 ;;; Compat shim tests

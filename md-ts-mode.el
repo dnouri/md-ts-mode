@@ -3551,6 +3551,15 @@ intersecting region must clean md-ts-owned parsed-link and
 hide-markup text properties even if another region already updated
 the family fontification tick.")
 
+(defvar-local md-ts--font-lock-dirty-side-effect-bounds-count 0
+  "Number of shared dirty side-effect ranges on this buffer family.
+Stored on the base buffer alongside `md-ts--font-lock-dirty-side-effect-bounds'.")
+
+(defvar-local md-ts--font-lock-dirty-side-effect-coalesce-at 128
+  "Shared dirty range count that triggers the next exact coalescing pass.
+A pass moves this threshold past its survivors; substantial regional
+cleanup lowers it so later redundant changes are consolidated promptly.")
+
 (defvar-local md-ts--font-lock-side-effect-modified-tick nil
   "Buffer modified tick represented by shared side-effect dirty state.
 This is stored on the base buffer when one exists.  A mismatch
@@ -3597,14 +3606,72 @@ edit, such as through a non-md-ts indirect buffer.")
 (defun md-ts--font-lock-set-dirty-side-effect-bounds (bounds)
   "Set shared dirty side-effect BOUNDS for the current buffer family."
   (with-current-buffer (md-ts--font-lock-state-buffer)
-    (setq md-ts--font-lock-dirty-side-effect-bounds bounds)))
+    (setq md-ts--font-lock-dirty-side-effect-bounds bounds
+          md-ts--font-lock-dirty-side-effect-bounds-count (length bounds))
+    ;; After regional cleanup removes most ranges, don't keep a threshold
+    ;; sized for the old backlog.  Small count changes leave it alone.
+    (when (< md-ts--font-lock-dirty-side-effect-bounds-count
+             (/ md-ts--font-lock-dirty-side-effect-coalesce-at 2))
+      (setq md-ts--font-lock-dirty-side-effect-coalesce-at
+            (max 128 (* 2 md-ts--font-lock-dirty-side-effect-bounds-count))))))
+
+(defun md-ts--font-lock-coalesce-dirty-side-effect-bounds ()
+  "Merge shared overlapping dirty ranges and detach redundant markers.
+Dirty bounds represent cleanup coverage, not separate cleanup jobs.
+Unlike stale pre-edit bounds, their overlap can be represented once."
+  (let ((ranges (sort md-ts--font-lock-dirty-side-effect-bounds
+                      (lambda (left right)
+                        (< (marker-position (car left))
+                           (marker-position (car right))))))
+        merged current)
+    (dolist (range ranges)
+      (let ((beg (marker-position (car range)))
+            (end (marker-position (cdr range))))
+        (cond
+         ((>= beg end)
+          (md-ts--font-lock-clear-marker-range range))
+         ((and current (<= beg (marker-position (cdr current))))
+          (when (> end (marker-position (cdr current)))
+            (set-marker (cdr current) end))
+          (md-ts--font-lock-clear-marker-range range))
+         (t
+          (when current (push current merged))
+          (setq current range)))))
+    (when current (push current merged))
+    (md-ts--font-lock-set-dirty-side-effect-bounds (nreverse merged))
+    (setq md-ts--font-lock-dirty-side-effect-coalesce-at
+          (max 128 (* 2 md-ts--font-lock-dirty-side-effect-bounds-count)))))
 
 (defun md-ts--font-lock-push-dirty-side-effect-bounds (beg end)
-  "Record changed bounds BEG..END needing shared side-effect cleanup."
+  "Record changed bounds BEG..END needing shared side-effect cleanup.
+Merge the hot range immediately; consolidate older overlaps only when
+new ranges outgrow the last sweep, so disjoint edits stay inexpensive."
   (when (< beg end)
     (with-current-buffer (md-ts--font-lock-state-buffer)
-      (push (md-ts--font-lock-marker-range beg end)
-            md-ts--font-lock-dirty-side-effect-bounds))))
+      (save-restriction
+        (widen)
+        (let ((head (car md-ts--font-lock-dirty-side-effect-bounds)))
+          (cond
+           ((and head (<= (marker-position (car head)) beg)
+                 (<= end (marker-position (cdr head)))))
+           ((and (= beg (point-min)) (= end (point-max)))
+            (let ((full (md-ts--font-lock-marker-range beg end)))
+              (dolist (range md-ts--font-lock-dirty-side-effect-bounds)
+                (md-ts--font-lock-clear-marker-range range))
+              (md-ts--font-lock-set-dirty-side-effect-bounds (list full))))
+           ((and head (<= beg (marker-position (cdr head)))
+                 (<= (marker-position (car head)) end))
+            (set-marker (car head) (min beg (marker-position (car head))))
+            (set-marker (cdr head) (max end (marker-position (cdr head)))))
+           (t
+            (push (md-ts--font-lock-marker-range beg end)
+                  md-ts--font-lock-dirty-side-effect-bounds)
+            (cl-incf md-ts--font-lock-dirty-side-effect-bounds-count)
+            ;; Sweep at twice the survivors, not again after consuming and
+            ;; re-dirtying one of many unchanged disjoint ranges.
+            (when (>= md-ts--font-lock-dirty-side-effect-bounds-count
+                      md-ts--font-lock-dirty-side-effect-coalesce-at)
+              (md-ts--font-lock-coalesce-dirty-side-effect-bounds)))))))))
 
 (defun md-ts--font-lock-side-effect-modified-tick ()
   "Return the shared side-effect modified tick for this buffer family."
