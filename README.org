@@ -17,7 +17,10 @@ Emacs 29, 30, and 31.
   (inline, full reference, collapsed reference, shortcut), images,
   block quotes, list markers, and indented code blocks.
 - Task list markers (=[ ]=, =[x]=) rendered as checkbox glyphs (☐, ☑).
-- Thematic breaks (=---=, =***=, =___=) rendered as horizontal rules.
+- Thematic breaks (=---=, =***=, =___=) rendered as horizontal rules
+  sized to the narrowest visible window showing the same text.  Set
+  ~md-ts-thematic-break-width~ to a positive number for a fixed width,
+  or to =0= to leave the Markdown characters visible.
 - Pipe tables with bold headers, subdued delimiter rows, and inline
   markup (emphasis, code, links) fontified inside cells.
 - HTML blocks highlighted with ~font-lock-doc-face~.

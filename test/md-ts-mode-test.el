@@ -43,6 +43,29 @@ Caller must kill the buffer when done."
       (font-lock-ensure))
     buf))
 
+(defun md-ts-test--fontify-jit (text)
+  "Fontify TEXT with live deferred Font Lock and return its buffer.
+Unlike `md-ts-test--fontify', this uses a non-hidden buffer name and
+turns Font Lock on in batch, so later `font-lock-ensure' skips text
+until a real flush marks it unfontified.  Caller kills the buffer."
+  (let ((buf (generate-new-buffer "md-ts-test-jit")))
+    (with-current-buffer buf
+      (insert text)
+      (md-ts-mode)
+      (let ((noninteractive nil))
+        (font-lock-mode 1))
+      (font-lock-ensure))
+    buf))
+
+(defun md-ts-test--rule-width (pos)
+  "Return the displayed thematic-break width at POS, or 0 if absent."
+  (length (get-text-property pos 'display)))
+
+(defun md-ts-test--refontify ()
+  "Explicitly flush and refontify the current test buffer."
+  (font-lock-flush)
+  (font-lock-ensure))
+
 (defun md-ts-test--face-at (text search &optional nth)
   "In markdown TEXT, find the NTH occurrence of SEARCH and return its face.
 NTH defaults to 1 (first occurrence).  Returns the face at the
@@ -814,6 +837,357 @@ line, the far line's tildes must not keep stale strike markup."
             (should (string-match-p "─" disp))
             (should (equal (get-text-property pos 'md-ts-display)
                            disp))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-thematic-break-fixed-width-and-off ()
+  "A fixed width is exact, and zero leaves the source text visible."
+  (let ((md-ts-thematic-break-width 40))
+    (let ((buf (md-ts-test--fontify "---\n")))
+      (unwind-protect
+          (with-current-buffer buf
+            (should (= (md-ts-test--rule-width (point-min)) 40))
+            (setq md-ts-thematic-break-width 2)
+            (md-ts-test--refontify)
+            (should (= (md-ts-test--rule-width (point-min)) 2))
+            (setq md-ts-thematic-break-width 0)
+            (md-ts-test--refontify)
+            (should-not (get-text-property (point-min) 'display))
+            (should-not (get-text-property (point-min) 'md-ts-display))
+            (should (eq (get-text-property (point-min) 'face)
+                        'md-ts-delimiter)))
+        (kill-buffer buf)))))
+
+(ert-deftest md-ts-test-thematic-break-auto-width-and-line-numbers ()
+  "Auto rules fit the text area, including the line-number gutter."
+  (let* ((md-ts-thematic-break-width nil)
+         (buf (md-ts-test--fontify "---\n")))
+    (unwind-protect
+        (save-window-excursion
+          (let ((window (selected-window)))
+            (set-window-buffer window buf)
+            (with-current-buffer buf
+              (md-ts-test--refontify)
+              (let ((without-numbers
+                     (md-ts-test--rule-width (point-min))))
+                (should (= without-numbers
+                           (window-max-chars-per-line window)))
+                (display-line-numbers-mode 1)
+                (md-ts-test--refontify)
+                (should (> (line-number-display-width) 0))
+                (should (= (md-ts-test--rule-width (point-min))
+                           (window-max-chars-per-line window)))
+                (should (< (md-ts-test--rule-width (point-min))
+                           without-numbers))))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-thematic-break-auto-width-nested ()
+  "Nested rules leave room for the visible blockquote prefix."
+  (let* ((md-ts-thematic-break-width nil)
+         (buf (md-ts-test--fontify "> > ---\n")))
+    (unwind-protect
+        (save-window-excursion
+          (let ((window (selected-window)))
+            (set-window-buffer window buf)
+            (with-current-buffer buf
+              (md-ts-test--refontify)
+              (goto-char (point-min))
+              (search-forward "---")
+              (should (= (md-ts-test--rule-width (match-beginning 0))
+                         (- (window-max-chars-per-line window) 4))))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-thematic-break-auto-width-offscreen ()
+  "Undisplayed rules use `fill-column' instead of an unrelated window."
+  (let* ((md-ts-thematic-break-width nil)
+         (buf (md-ts-test--fontify "---\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (should-not (get-buffer-window buf t))
+          (setq-local fill-column 42)
+          (md-ts-test--refontify)
+          (should (= (md-ts-test--rule-width (point-min)) 42)))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-thematic-break-auto-width-shared-views ()
+  "An indirect view uses the base option and the narrowest view's width."
+  (let* ((md-ts-thematic-break-width nil)
+         (base (md-ts-test--fontify "---\n"))
+         indirect)
+    (unwind-protect
+        (save-window-excursion
+          (setq indirect (make-indirect-buffer base " *md-ts-test-indirect*" t))
+          (with-current-buffer indirect
+            (md-ts-mode)
+            (setq-local md-ts-thematic-break-width 60))
+          (let* ((wide (selected-window))
+                 (narrow (split-window-right)))
+            (window-resize wide 10 t)
+            (set-window-buffer wide base)
+            (set-window-buffer narrow indirect)
+            (with-current-buffer indirect
+              (md-ts-test--refontify)
+              (should (< (window-max-chars-per-line narrow)
+                         (window-max-chars-per-line wide)))
+              (should (= (md-ts-test--rule-width (point-min))
+                         (window-max-chars-per-line narrow))))))
+      (when (buffer-live-p indirect)
+        (kill-buffer indirect))
+      (kill-buffer base))))
+
+(ert-deftest md-ts-test-thematic-break-display-excludes-newline ()
+  "Each rule owns only its marker text, not the line break after it."
+  (let ((buf (md-ts-test--fontify "***\n***\n\nAfter\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (dotimes (_ 2)
+            (search-forward "***")
+            (should (get-text-property (match-beginning 0) 'display))
+            (should-not (get-text-property (point) 'display))
+            (should-not (get-text-property (point) 'md-ts-display)))
+          (should (eq (char-after (point)) ?\n)))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-thematic-break-refresh-width ()
+  "Resizing refits a rule; unchanged width does no work or buffer edits."
+  (let* ((md-ts-thematic-break-width nil)
+         (buf (md-ts-test--fontify-jit "---\n")))
+    (unwind-protect
+        (save-window-excursion
+          (let ((window (selected-window)))
+            (split-window-right)
+            (set-window-buffer window buf)
+            (with-current-buffer buf
+              (md-ts--refresh-thematic-break-widths window)
+              (font-lock-ensure)
+              (let ((before (md-ts-test--rule-width (point-min))))
+                (should (get-text-property (point-min) 'fontified))
+                (setq buffer-undo-list nil)
+                (set-buffer-modified-p nil)
+                (setq buffer-read-only t)
+                ;; A settled window must not flush the whole document
+                ;; again on every redisplay.
+                (cl-letf (((symbol-function 'font-lock-flush)
+                           (lambda (&rest _)
+                             (ert-fail "unchanged width triggered a flush"))))
+                  (md-ts--refresh-thematic-break-widths window))
+                (window-resize window -5 t)
+                (md-ts--refresh-thematic-break-widths window)
+                (font-lock-ensure)
+                (should (< (md-ts-test--rule-width (point-min)) before))
+                (should (= (md-ts-test--rule-width (point-min))
+                           (window-max-chars-per-line window)))
+                (should-not (buffer-modified-p))
+                (should-not buffer-undo-list)))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-thematic-break-offscreen-refontify-refreshes ()
+  "A rule refontified off-screen refits when its window returns."
+  (let* ((md-ts-thematic-break-width nil)
+         (buf (md-ts-test--fontify-jit "---\n"))
+         (scratch (generate-new-buffer " *md-ts-test-scratch*"))
+         (window (selected-window)))
+    (unwind-protect
+        (save-window-excursion
+          (set-window-buffer window buf)
+          (with-current-buffer buf
+            (md-ts--refresh-thematic-break-widths window)
+            (font-lock-ensure)
+            (let ((shown-width (md-ts-test--rule-width (point-min))))
+              (should (get-text-property (point-min) 'fontified))
+              (set-window-buffer window scratch)
+              (setq-local fill-column 120)
+              (md-ts-test--refontify)
+              (should (= (md-ts-test--rule-width (point-min)) 120))
+              (set-window-buffer window buf)
+              (md-ts--refresh-thematic-break-widths window)
+              (font-lock-ensure)
+              (should (= (md-ts-test--rule-width (point-min))
+                         shown-width)))))
+      (kill-buffer scratch)
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-thematic-break-refreshes-partially-fontified-rules ()
+  "A partial refontification must not hide an older, over-wide rule."
+  (let* ((md-ts-thematic-break-width nil)
+         (buf (md-ts-test--fontify-jit "---\n\none\n\nmiddle\n\n***\n")))
+    (unwind-protect
+        (save-window-excursion
+          (let ((window (selected-window)))
+            (set-window-buffer window buf)
+            (with-current-buffer buf
+              (md-ts--refresh-thematic-break-widths window)
+              (font-lock-ensure)
+              (goto-char (point-min))
+              (search-forward "***")
+              (let ((second (match-beginning 0))
+                    (old-width (md-ts-test--rule-width (point-min))))
+                (split-window-right)
+                (funcall font-lock-fontify-region-function
+                         (point-min) (1+ (point-min)) nil)
+                (should (< (md-ts-test--rule-width (point-min)) old-width))
+                (should (= (md-ts-test--rule-width second) old-width))
+                (md-ts--refresh-thematic-break-widths window)
+                (font-lock-ensure)
+                (should (= (md-ts-test--rule-width second)
+                           (window-max-chars-per-line window)))))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-thematic-break-fixed-or-off-to-auto ()
+  "Returning to auto restores the rule, with or without a fixed-mode redraw."
+  (dolist (setting '(40 0))
+    (dolist (redisplay-fixed '(nil t))
+      (let* ((md-ts-thematic-break-width nil)
+             (buf (md-ts-test--fontify-jit "---\n"))
+             (window (selected-window)))
+        (unwind-protect
+            (save-window-excursion
+              (set-window-buffer window buf)
+              (with-current-buffer buf
+                (md-ts--refresh-thematic-break-widths window)
+                (font-lock-ensure)
+                (let ((auto-width (md-ts-test--rule-width (point-min))))
+                  (setq md-ts-thematic-break-width setting)
+                  (md-ts-test--refontify)
+                  (should (= (md-ts-test--rule-width (point-min)) setting))
+                  (when redisplay-fixed
+                    (md-ts--refresh-thematic-break-widths window))
+                  (setq md-ts-thematic-break-width nil)
+                  (md-ts--refresh-thematic-break-widths window)
+                  (font-lock-ensure)
+                  (should (= (md-ts-test--rule-width (point-min))
+                             auto-width)))))
+          (kill-buffer buf))))))
+
+(ert-deftest md-ts-test-thematic-break-fixed-equals-auto-nested ()
+  "A fixed rule whose width equals the window still shrinks in auto mode."
+  (let* ((md-ts-thematic-break-width nil)
+         (buf (md-ts-test--fontify-jit "> > ---\n"))
+         (window (selected-window)))
+    (unwind-protect
+        (save-window-excursion
+          (set-window-buffer window buf)
+          (with-current-buffer buf
+            (md-ts--refresh-thematic-break-widths window)
+            (font-lock-ensure)
+            (goto-char (point-min))
+            (search-forward "---")
+            (let ((pos (match-beginning 0))
+                  (available (window-max-chars-per-line window)))
+              (should (= (md-ts-test--rule-width pos) (- available 4)))
+              (setq md-ts-thematic-break-width available)
+              (md-ts-test--refontify)
+              (should (= (md-ts-test--rule-width pos) available))
+              (md-ts--refresh-thematic-break-widths window)
+              (setq md-ts-thematic-break-width nil)
+              (md-ts--refresh-thematic-break-widths window)
+              (font-lock-ensure)
+              (should (= (md-ts-test--rule-width pos) (- available 4))))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-thematic-break-refreshes-outside-narrowing ()
+  "Resize refreshes a rule beyond the current buffer restriction."
+  (let* ((md-ts-thematic-break-width nil)
+         (buf (md-ts-test--fontify-jit "---\n\ntext\n\n***\n")))
+    (unwind-protect
+        (save-window-excursion
+          (let ((window (selected-window)))
+            (set-window-buffer window buf)
+            (with-current-buffer buf
+              (md-ts--refresh-thematic-break-widths window)
+              (font-lock-ensure)
+              (goto-char (point-min))
+              (search-forward "***")
+              (let ((second (match-beginning 0))
+                    (old-width (md-ts-test--rule-width (point-min))))
+                (goto-char (point-min))
+                (narrow-to-region (line-beginning-position) (line-end-position))
+                (split-window-right)
+                (md-ts--refresh-thematic-break-widths window)
+                (widen)
+                (font-lock-ensure)
+                (should (< (md-ts-test--rule-width second) old-width))
+                (should (= (md-ts-test--rule-width second)
+                           (window-max-chars-per-line window)))))))
+      (kill-buffer buf))))
+
+(ert-deftest md-ts-test-thematic-break-indirect-owner-refits ()
+  "A sole indirect owner refits rules when its window narrows.
+The base buffer never enters md-ts mode, so the shared-text root is
+not an owner and the family refresh must flush the indirect buffer
+itself.  Keeping the base out of md-ts mode from the start also
+keeps the indirect buffer's parsers alive on every Emacs version;
+parsers die with the base's mode change and only older Emacs
+recreates them during fontification."
+  (let* ((md-ts-thematic-break-width nil)
+         (base (generate-new-buffer "md-ts-test-base"))
+         indirect)
+    (unwind-protect
+        (save-window-excursion
+          (with-current-buffer base (insert "---\n"))
+          (setq indirect (make-indirect-buffer base "md-ts-test-indirect" t))
+          (with-current-buffer indirect
+            (md-ts-mode)
+            (let ((noninteractive nil)) (font-lock-mode 1)))
+          (let ((window (selected-window)))
+            (set-window-buffer window indirect)
+            (with-current-buffer indirect
+              (md-ts--refresh-thematic-break-widths window)
+              (font-lock-ensure)
+              (let ((before (md-ts-test--rule-width (point-min))))
+                (should (> before 0))
+                (split-window-right)
+                (md-ts--refresh-thematic-break-widths window)
+                (font-lock-ensure)
+                (should (< (md-ts-test--rule-width (point-min)) before))
+                (should (= (md-ts-test--rule-width (point-min))
+                           (window-max-chars-per-line window)))))))
+      (when (buffer-live-p indirect) (kill-buffer indirect))
+      (when (buffer-live-p base) (kill-buffer base)))))
+
+(ert-deftest md-ts-test-thematic-break-last-indirect-owner-reentry ()
+  "Re-entering md-ts mode recreates the last indirect owner's rules.
+The indirect buffer is the sole owner over a base that never enters
+md-ts mode, so leaving the mode must invalidate the width cache:
+no setup sweep or jit callback will reconstruct the rules in an
+indirect buffer, and a stale cache would skip the refresh."
+  (let* ((md-ts-thematic-break-width nil)
+         (base (generate-new-buffer "md-ts-test-base"))
+         indirect)
+    (unwind-protect
+        (save-window-excursion
+          (with-current-buffer base (insert "---\n"))
+          (setq indirect (make-indirect-buffer base "md-ts-test-indirect" t))
+          (with-current-buffer indirect
+            (md-ts-mode)
+            (let ((noninteractive nil)) (font-lock-mode 1)))
+          (let ((window (selected-window)))
+            (set-window-buffer window indirect)
+            (with-current-buffer indirect
+              (md-ts--refresh-thematic-break-widths window)
+              (font-lock-ensure)
+              (should (get-text-property (point-min) 'display))
+              (fundamental-mode)
+              (should-not (get-text-property (point-min) 'display))
+              (md-ts-mode)
+              (let ((noninteractive nil)) (font-lock-mode 1))
+              (md-ts--refresh-thematic-break-widths window)
+              (font-lock-ensure)
+              (should (= (md-ts-test--rule-width (point-min))
+                         (window-max-chars-per-line window))))))
+      (when (buffer-live-p indirect) (kill-buffer indirect))
+      (when (buffer-live-p base) (kill-buffer base)))))
+
+(ert-deftest md-ts-test-thematic-break-refresh-hook-teardown ()
+  "Leaving md-ts mode removes its buffer-local width refresh hook."
+  (let ((buf (md-ts-test--fontify "---\n")))
+    (unwind-protect
+        (with-current-buffer buf
+          (should (memq #'md-ts--refresh-thematic-break-widths
+                        pre-redisplay-functions))
+          (text-mode)
+          (should-not (memq #'md-ts--refresh-thematic-break-widths
+                            pre-redisplay-functions)))
       (kill-buffer buf))))
 
 (ert-deftest md-ts-test-fenced-code-block ()
