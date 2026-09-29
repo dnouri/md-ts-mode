@@ -18,7 +18,7 @@ Emacs 29, 30, and 31.
   block quotes, list markers, and indented code blocks.
 - Task list markers (=[ ]=, =[x]=) rendered as checkbox glyphs (☐, ☑).
 - Thematic breaks (=---=, =***=, =___=) rendered as horizontal rules
-  sized to the narrowest window showing the buffer.  Set
+  sized to the narrowest visible window showing the same text.  Set
   ~md-ts-thematic-break-width~ to a positive number for a fixed width,
   or to =0= to leave the Markdown characters visible.
 - Pipe tables with bold headers, subdued delimiter rows, and inline

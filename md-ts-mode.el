@@ -774,15 +774,19 @@ them.  Existing buffers need refontification after changing this."
 
 (defcustom md-ts-thematic-break-width nil
   "Width in columns of displayed Markdown thematic breaks.
-When nil, fit the narrowest window showing the buffer's text, leaving
-room for line numbers and any prefix before the rule.  Wider windows
-may show a shorter rule so it fits in narrower ones.  Rules remain at
-least three columns wide, so exceptionally narrow windows may wrap.
-When no window shows the text, use `fill-column' for the width.
+When nil, fit the narrowest visible window showing the shared text,
+including base and indirect views on other terminals.  Hidden and
+iconified frames do not count.  Leave room for line numbers and any
+prefix before the rule; wider windows may show a shorter rule so it
+fits in narrower ones.  Rules remain at least three columns wide, so
+exceptionally narrow windows may wrap.  With no visible window, use
+`fill-column' for the width.
 A positive integer fixes the width; 0 leaves the literal markup visible.
 Changes take effect on refontification; automatic widths are refreshed
 when the available window width changes during redisplay.
-Indirect buffers follow their base buffer's value."
+Indirect buffers follow their base buffer's value.  nil and widths
+from 0 through 1000 are safe as file-local values; larger fixed widths
+require confirmation, but are not otherwise limited."
   :type '(choice (const :tag "Fit narrowest window" nil)
                  (const :tag "Show literal markup" 0)
                  (natnum :tag "Fixed width in columns"))
@@ -895,7 +899,7 @@ buffers use their base buffer's `md-ts-hide-markup' value."
       (buffer-local-value 'md-ts-hide-markup base)
     md-ts-hide-markup))
 
-(defun md-ts--thematic-break-width ()
+(defun md-ts--thematic-break-width-option ()
   "Return the thematic-break width option for the shared text.
 Indirect buffers use their base buffer's setting, since their text
 properties are shared."
@@ -905,10 +909,11 @@ properties are shared."
 
 (defun md-ts--thematic-break-available-width ()
   "Return the narrowest available rule width for the shared text.
-Count windows showing the current buffer or any indirect buffer
-sharing its text, skipping frames that are not visible.  Measure
-with the rule's face so customized delimiter fonts size correctly.
-If no window shows the text, use `fill-column'."
+Count visible windows showing the shared text, including the base
+buffer's windows when the current buffer is indirect and windows on
+other terminals.  Measure with the rule's face so customized delimiter
+fonts size correctly.  If no visible window shows the text, use
+`fill-column'."
   (let ((root (md-ts--font-lock-state-buffer))
         width)
     (walk-windows
@@ -923,16 +928,17 @@ If no window shows the text, use `fill-column'."
     (or width (buffer-local-value 'fill-column root))))
 
 (defvar-local md-ts--thematic-break-last-width nil
-  "Last available rule width seen during redisplay for this buffer family.
-This cache lives on the base buffer so indirect views agree on when to
-refontify their shared text.  nil means the fontified rules may not
-match the current width and the next redisplay should refontify them.")
+  "Available width targeted by the last whole-text rule refresh.
+This cache lives on the base buffer so indirect views agree on the
+refresh target.  nil means some rules may be stale and the next
+automatic redisplay should refresh the shared text.")
 
-(defun md-ts--thematic-break-note-fontify-width (width)
-  "Invalidate the width cache when rules are fontified at WIDTH.
-Off-screen fontification sizes rules by the `fill-column' fallback,
-which no redisplay observes.  A mismatch clears the cache so the
-next redisplay of a window refreshes the stale rules."
+(defun md-ts--thematic-break-invalidate-width (width)
+  "Invalidate the refresh target if a rule is fontified at WIDTH.
+WIDTH is nil for fixed or disabled rules and on final teardown.  An
+automatic rule fontified at another width, such as the `fill-column'
+fallback off-screen, can leave other rules stale; the next redisplay
+must refresh the whole shared text."
   (let ((root (md-ts--font-lock-state-buffer)))
     (unless (equal width (buffer-local-value
                           'md-ts--thematic-break-last-width root))
@@ -944,22 +950,18 @@ next redisplay of a window refreshes the stale rules."
 Run as a buffer-local `pre-redisplay-functions' hook.  WINDOW is the
 window about to be redisplayed.  Only the shared available width is
 cached; each thematic break accounts for its own starting column."
-  (let ((root (md-ts--font-lock-state-buffer)))
-    (if (md-ts--thematic-break-width)
+  (unless (md-ts--thematic-break-width-option)
+    (let ((root (md-ts--font-lock-state-buffer))
+          (width (md-ts--thematic-break-available-width)))
+      (unless (equal width (buffer-local-value
+                            'md-ts--thematic-break-last-width root))
         (with-current-buffer root
-          (setq md-ts--thematic-break-last-width nil))
-      (let ((width (md-ts--thematic-break-available-width)))
-        (unless (equal width (buffer-local-value
-                              'md-ts--thematic-break-last-width root))
-          (with-current-buffer root
-            (setq md-ts--thematic-break-last-width width))
-          (dolist (buffer (buffer-list))
-            (with-current-buffer buffer
-              (when (and (eq (or (buffer-base-buffer) buffer) root)
-                         (md-ts--side-effect-properties-owner-p))
-                (save-restriction
-                  (widen)
-                  (font-lock-flush (point-min) (point-max)))))))))))
+          (setq md-ts--thematic-break-last-width width))
+        (dolist (buffer (buffer-list))
+          (with-current-buffer buffer
+            (when (and (eq (md-ts--font-lock-state-buffer) root)
+                       (md-ts--side-effect-properties-owner-p))
+              (md-ts--flush-all-font-lock))))))))
 
 (defun md-ts--invisible-value-includes-p (value member)
   "Return non-nil when invisible VALUE includes MEMBER."
@@ -1097,9 +1099,11 @@ OVERRIDE, START, and END are passed to `treesit-fontify-with-override'.
 The display replaces the marker text but not its trailing newline."
   (let* ((beg (treesit-node-start node))
          (node-end (treesit-node-end node))
-         (width (md-ts--thematic-break-width)))
+         (width (md-ts--thematic-break-width-option)))
     (treesit-fontify-with-override beg node-end 'md-ts-delimiter
                                    override start end)
+    (when width
+      (md-ts--thematic-break-invalidate-width nil))
     (unless (eql width 0)
       (let ((rule-end (if (eq (char-before node-end) ?\n)
                           (1- node-end) node-end)))
@@ -1108,7 +1112,7 @@ The display replaces the marker text but not its trailing newline."
          (make-string
           (or width
               (let ((available (md-ts--thematic-break-available-width)))
-                (md-ts--thematic-break-note-fontify-width available)
+                (md-ts--thematic-break-invalidate-width available)
                 ;; Hidden blockquote markers can make this estimate short,
                 ;; which is preferable to letting the rule wrap.
                 (max 3 (- available
@@ -4486,7 +4490,7 @@ changed."
      (buffer-list))))
 
 (defun md-ts--teardown-side-effect-properties ()
-  "Clean md-ts-owned side effects before leaving or killing an owner."
+  "Remove the refresh hook and clean side effects on owner exit or kill."
   (remove-hook 'pre-redisplay-functions
                #'md-ts--refresh-thematic-break-widths t)
   (when (md-ts--side-effect-properties-owner-p)
@@ -4494,8 +4498,7 @@ changed."
         (unless (md-ts--other-md-ts-buffer-sharing-text-p)
           (md-ts--cleanup-whole-buffer-side-effect-properties)
           (md-ts--font-lock-clear-side-effect-state)
-          (with-current-buffer (md-ts--font-lock-state-buffer)
-            (setq md-ts--thematic-break-last-width nil)))
+          (md-ts--thematic-break-invalidate-width nil))
       (setq md-ts--side-effect-properties-owner nil))))
 
 (defun md-ts--setup-clean-side-effect-properties ()
