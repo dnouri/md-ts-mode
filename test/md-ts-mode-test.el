@@ -1112,22 +1112,30 @@ line, the far line's tildes must not keep stale strike markup."
       (kill-buffer buf))))
 
 (ert-deftest md-ts-test-thematic-break-indirect-owner-refits ()
-  "An indirect owner refits rules after its base leaves md-ts mode."
+  "A sole indirect owner refits rules when its window narrows.
+The base buffer never enters md-ts mode, so the shared-text root is
+not an owner and the family refresh must flush the indirect buffer
+itself.  Keeping the base out of md-ts mode from the start also
+keeps the indirect buffer's parsers alive on every Emacs version;
+parsers die with the base's mode change and only older Emacs
+recreates them during fontification."
   (let* ((md-ts-thematic-break-width nil)
-         (base (md-ts-test--fontify-jit "---\n"))
-         (indirect (make-indirect-buffer base "md-ts-test-indirect" t)))
+         (base (generate-new-buffer "md-ts-test-base"))
+         indirect)
     (unwind-protect
         (save-window-excursion
+          (with-current-buffer base (insert "---\n"))
+          (setq indirect (make-indirect-buffer base "md-ts-test-indirect" t))
           (with-current-buffer indirect
             (md-ts-mode)
             (let ((noninteractive nil)) (font-lock-mode 1)))
           (let ((window (selected-window)))
             (set-window-buffer window indirect)
-            (with-current-buffer base (fundamental-mode))
             (with-current-buffer indirect
               (md-ts--refresh-thematic-break-widths window)
               (font-lock-ensure)
               (let ((before (md-ts-test--rule-width (point-min))))
+                (should (> before 0))
                 (should (get-text-property (point-min) 'fontified))
                 (split-window-right)
                 (md-ts--refresh-thematic-break-widths window)
@@ -1135,22 +1143,27 @@ line, the far line's tildes must not keep stale strike markup."
                 (should (< (md-ts-test--rule-width (point-min)) before))
                 (should (= (md-ts-test--rule-width (point-min))
                            (window-max-chars-per-line window)))))))
-      (kill-buffer indirect)
-      (kill-buffer base))))
+      (when (buffer-live-p indirect) (kill-buffer indirect))
+      (when (buffer-live-p base) (kill-buffer base)))))
 
 (ert-deftest md-ts-test-thematic-break-last-indirect-owner-reentry ()
-  "Re-entering md-ts mode recreates the last indirect owner's rules."
+  "Re-entering md-ts mode recreates the last indirect owner's rules.
+The indirect buffer is the sole owner over a base that never enters
+md-ts mode, so leaving the mode must invalidate the width cache:
+no setup sweep or jit callback will reconstruct the rules in an
+indirect buffer, and a stale cache would skip the refresh."
   (let* ((md-ts-thematic-break-width nil)
-         (base (md-ts-test--fontify-jit "---\n"))
-         (indirect (make-indirect-buffer base "md-ts-test-indirect" t)))
+         (base (generate-new-buffer "md-ts-test-base"))
+         indirect)
     (unwind-protect
         (save-window-excursion
+          (with-current-buffer base (insert "---\n"))
+          (setq indirect (make-indirect-buffer base "md-ts-test-indirect" t))
           (with-current-buffer indirect
             (md-ts-mode)
             (let ((noninteractive nil)) (font-lock-mode 1)))
           (let ((window (selected-window)))
             (set-window-buffer window indirect)
-            (with-current-buffer base (fundamental-mode))
             (with-current-buffer indirect
               (md-ts--refresh-thematic-break-widths window)
               (font-lock-ensure)
@@ -1163,8 +1176,8 @@ line, the far line's tildes must not keep stale strike markup."
               (font-lock-ensure)
               (should (= (md-ts-test--rule-width (point-min))
                          (window-max-chars-per-line window))))))
-      (kill-buffer indirect)
-      (kill-buffer base))))
+      (when (buffer-live-p indirect) (kill-buffer indirect))
+      (when (buffer-live-p base) (kill-buffer base)))))
 
 (ert-deftest md-ts-test-thematic-break-refresh-hook-teardown ()
   "Leaving md-ts mode removes its buffer-local width refresh hook."
