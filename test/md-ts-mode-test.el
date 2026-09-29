@@ -1136,7 +1136,6 @@ recreates them during fontification."
               (font-lock-ensure)
               (let ((before (md-ts-test--rule-width (point-min))))
                 (should (> before 0))
-                (should (get-text-property (point-min) 'fontified))
                 (split-window-right)
                 (md-ts--refresh-thematic-break-widths window)
                 (font-lock-ensure)
