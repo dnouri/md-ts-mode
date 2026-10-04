@@ -1676,6 +1676,53 @@ inline parser ranges cause the first range's faces to be dropped."
       (md-ts-test--push-button-at-search text "notes"))
     (should (equal-including-properties opened "docs/a#b.md"))))
 
+(ert-deftest md-ts-test-link-inline-percent-encoded-local-path-opens-decoded-file ()
+  "Percent-encoded local destinations open their decoded file names."
+  (let ((text "Open [report](tmp/reports/2026-10-04%20-%20v3.3.0.html) now.\n")
+        opened)
+    (should (equal (md-ts-test--help-echo-at-search text "report")
+                   "tmp/reports/2026-10-04%20-%20v3.3.0.html"))
+    (cl-letf (((symbol-function 'find-file)
+               (lambda (file &rest _args)
+                 (setq opened file)))
+              ((symbol-function 'browse-url)
+               (lambda (&rest _args)
+                 (ert-fail "browse-url called for percent-encoded local path"))))
+      (md-ts-test--push-button-at-search text "report"))
+    (should (equal opened "tmp/reports/2026-10-04 - v3.3.0.html"))))
+
+(ert-deftest md-ts-test-link-inline-percent-escape-edges ()
+  "Malformed percent escapes stay literal; encoded hashes are filename text."
+  (dolist (case '(("docs/100%.md" . "docs/100%.md")
+                  ("docs/a%23b.md" . "docs/a#b.md")
+                  ("docs/caf%C3%A9.md" . "docs/café.md")
+                  ("docs/a%0Ab.md" . "docs/a
+b.md")))
+    (let* ((text (format "Open [notes](%s) please.\n" (car case)))
+           opened)
+      (cl-letf (((symbol-function 'find-file)
+                 (lambda (file &rest _args)
+                   (setq opened file)))
+                ((symbol-function 'browse-url)
+                 (lambda (&rest _args)
+                   (ert-fail "browse-url called for local path"))))
+        (md-ts-test--push-button-at-search text "notes"))
+      (should (equal opened (cdr case))))))
+
+(ert-deftest md-ts-test-link-inline-percent-encoded-external-url-stays-authored ()
+  "External destinations keep their authored percent escapes."
+  (let ((opened))
+    (cl-letf (((symbol-function 'browse-url)
+               (lambda (url &rest _args)
+                 (setq opened url)))
+              ((symbol-function 'find-file)
+               (lambda (&rest _args)
+                 (ert-fail "find-file called for external link"))))
+      (md-ts-test--push-button-at-search
+       "Read [spec](gemini://example.com/a%20b) now.\n"
+       "spec"))
+    (should (equal opened "gemini://example.com/a%20b"))))
+
 (ert-deftest md-ts-test-link-inline-escaped-hash-before-fragment-opens-file-only ()
   "Escaped hashes stay literal before an unescaped local fragment."
   (let ((text "Open [notes](docs/a\\#b.md#intro) please.\n")
