@@ -1284,16 +1284,40 @@ definition."
   (gethash (md-ts--reference-label-key label)
            (md-ts--link-reference-definitions)))
 
+(defun md-ts--local-file-name (url)
+  "Return local URL's file name with URL percent escapes decoded.
+Escapes denote UTF-8 bytes, not characters; malformed percent sequences
+stay literal, and encoded control characters such as %0A stay literal
+rather than being substituted.  This matches how CommonMark consumers
+resolve relative link destinations to file names."
+  (if (not (string-match-p "%[0-9A-Fa-f][0-9A-Fa-f]" url))
+      url
+    (let ((index 0)
+          (bytes nil))
+      (while (string-match "%\\([0-9A-Fa-f][0-9A-Fa-f]\\)" url index)
+        (setq bytes
+              (nconc bytes
+                     (string-to-list
+                      (encode-coding-string
+                       (substring url index (match-beginning 0)) 'utf-8))
+                     (list (string-to-number (match-string 1 url) 16)))
+              index (match-end 0)))
+      (setq bytes
+            (nconc bytes
+                   (string-to-list
+                    (encode-coding-string (substring url index) 'utf-8))))
+      (decode-coding-string (apply #'unibyte-string bytes) 'utf-8))))
+
 (defun md-ts--open-link-destination (url)
   "Open supported Markdown or bare link destination URL.
 URL may come from parsed links, images, references, autolinks, or
 bare prose links.  Use `url-mailto' for `mailto:' targets,
 `browse-url' for other URI schemes, and `find-file' for local or
-relative paths.  Local/same-buffer fragment navigation is
-deferred: local paths with an unescaped `#fragment' open only the
-file part, and fragment-only destinations signal a `user-error'.  Escaped `#'
-characters are literal filename characters.  Empty destinations are
-not supported yet."
+relative paths, percent-decoded first.  Local/same-buffer fragment
+navigation is deferred: local paths with an unescaped `#fragment'
+open only the file part, and fragment-only destinations signal a
+`user-error'.  Escaped `#' characters are literal filename
+characters.  Empty destinations are not supported yet."
   (let* ((case-fold-search t)
          (fragment-start (md-ts--local-link-fragment-start url))
          (plain-url (substring-no-properties url)))
@@ -1305,11 +1329,13 @@ not supported yet."
      ((string-match-p "\\`mailto:" url)
       (url-mailto (url-generic-parse-url plain-url)))
      ((md-ts--windows-drive-path-p url)
-      (find-file (substring-no-properties url 0 fragment-start)))
+      (find-file (md-ts--local-file-name
+                  (substring-no-properties url 0 fragment-start))))
      ((md-ts--uri-scheme-p url)
       (browse-url plain-url))
      (t
-      (find-file (substring-no-properties url 0 fragment-start))))))
+      (find-file (md-ts--local-file-name
+                  (substring-no-properties url 0 fragment-start)))))))
 
 (defun md-ts--make-link-button (beg end url &optional _dynamic static-target)
   "Make the text from BEG to END open URL as a standard button.
