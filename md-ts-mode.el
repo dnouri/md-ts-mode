@@ -5,7 +5,7 @@
 
 ;; Author: Daniel Nouri <daniel.nouri@gmail.com>
 ;; URL: https://github.com/dnouri/md-ts-mode
-;; Version: 0.4.0
+;; Version: 0.5
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: markdown languages tree-sitter
 
