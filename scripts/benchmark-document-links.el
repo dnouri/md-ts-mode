@@ -317,6 +317,27 @@ of the buffer).  Each iteration performs MUTATIONS mutations (default
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(defun md-ts-bench--measure-fenced-append (iterations text)
+  "Measure appending a fenced block after TEXT and fontifying it.
+The new text has a reference link, as in a transcript that keeps
+growing below its definitions."
+  (let ((buffer (generate-new-buffer " *md-ts-bench-append*")))
+    (unwind-protect
+        (with-current-buffer buffer
+          (insert text)
+          (md-ts-mode)
+          (font-lock-ensure (point-min) (point-max))
+          (md-ts-bench--measure
+           iterations
+           (lambda ()
+             (goto-char (point-max))
+             (let ((start (point)))
+               (insert "See [runbook][runbook-001].\n\n"
+                       "```sh\necho output\n```\n\n")
+               (font-lock-fontify-region start (point-max))))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (defun md-ts-bench--emit-result (case-name op text item-count item-unit counts times)
   "Print one parseable-ish RESULT line for CASE-NAME and TIMES."
   (md-ts-bench--log
@@ -378,7 +399,9 @@ of the buffer).  Each iteration performs MUTATIONS mutations (default
          "A deterministic mix of prose")
         ("fence-body-mutation-smoke" mutation-one-char
          ,(md-ts-bench--mixed-chat-prose-doc 10) 8 "mutations"
-         "curl 'https://code.example.invalid/010"))
+         "curl 'https://code.example.invalid/010")
+        ("fenced-append-smoke" fenced-append
+         ,(md-ts-bench--mixed-chat-prose-doc 2) 2 "threads"))
     `(("plain-prose-800" mode+font-lock
        ,(md-ts-bench--plain-prose-doc 800) 800 "lines")
       ("bare-links-100" mode+font-lock
@@ -400,7 +423,9 @@ of the buffer).  Each iteration performs MUTATIONS mutations (default
        "A deterministic mix of prose")
       ("fence-body-mutation" mutation-one-char
        ,(md-ts-bench--mixed-chat-prose-doc 100) 40 "mutations"
-       "curl 'https://code.example.invalid/050"))))
+       "curl 'https://code.example.invalid/050")
+      ("fenced-append" fenced-append
+       ,(md-ts-bench--mixed-chat-prose-doc 1000) 1000 "threads"))))
 
 (defconst md-ts-bench--smoke-min-counts
   '(("plain-prose-smoke" :link-buttons 0 :bare-link-props 0 :static-targets 0)
@@ -409,7 +434,8 @@ of the buffer).  Each iteration performs MUTATIONS mutations (default
     ("parsed-refs-smoke" :link-buttons 4)
     ("mixed-chat-prose-smoke" :link-buttons 16 :bare-link-props 10 :static-targets 10)
     ("mixed-chat-prose-mutation-smoke" :link-buttons 16 :bare-link-props 10 :static-targets 10)
-    ("fence-body-mutation-smoke" :link-buttons 60 :bare-link-props 40 :static-targets 40))
+    ("fence-body-mutation-smoke" :link-buttons 60 :bare-link-props 40 :static-targets 40)
+    ("fenced-append-smoke" :link-buttons 16 :bare-link-props 10 :static-targets 10))
   "Minimum link artifact counts expected for deterministic smoke fixtures.")
 
 (defun md-ts-bench--validate-smoke-counts (case-name counts)
@@ -453,7 +479,10 @@ of the buffer).  Each iteration performs MUTATIONS mutations (default
                             ('mutation-one-char
                              (md-ts-bench--measure-mutation-one-char
                               md-ts-bench-iterations text
-                              (car op-args) items)))))
+                              (car op-args) items))
+                            ('fenced-append
+                             (md-ts-bench--measure-fenced-append
+                              md-ts-bench-iterations text)))))
               (md-ts-bench--validate-smoke-counts name counts)
               (md-ts-bench--emit-result name op text items item-unit
                                         counts times))))

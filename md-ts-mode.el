@@ -1309,7 +1309,13 @@ values are URLs normalized with `md-ts--link-destination-url'.")
 
 (defvar-local md-ts--link-reference-definitions-cache-tick nil
   "Buffer modified tick represented by reference definitions cache.
-A nil value means no cache is available.")
+A nil value means no cache is available.  The change hooks advance it
+across an edit that cannot reach a definition; see
+`md-ts--edit-reach-start'.")
+
+(defvar-local md-ts--definition-free-edit nil
+  "State recorded before a change no definition text follows, or nil.
+The value is (TICK . SIZE): the buffer's character tick and size.")
 
 (defvar-local md-ts--link-reference-definition-change-p nil
   "Non-nil when current change may affect reference definitions.")
@@ -1346,7 +1352,8 @@ The result is a hash table mapping labels normalized with
 `md-ts--reference-label-key' to URLs normalized with
 `md-ts--link-destination-url'.  When duplicate labels exist, the
 first definition in source order wins.  The cache ignores any
-active narrowing so references resolve against the whole buffer."
+active narrowing so references resolve against the whole buffer.
+Edits that the change hooks did not see rebuild it."
   (save-restriction
     (widen)
     (let ((tick (buffer-chars-modified-tick)))
@@ -2172,19 +2179,24 @@ tokens.  This deliberately over-approximates the parsed link-flush
 predicates: false positives only cost a tree check, while false
 negatives would skip needed whole-buffer flushes.")
 
-(defun md-ts--blank-line-delimited-block-bounds (beg end)
-  "Return line bounds of the blank-line-delimited block around BEG..END.
-Lines containing only whitespace delimit blocks.  The scan stops at
-the enclosing delimiters, so even pathological inputs stay cheap."
+(defun md-ts--blank-line-delimited-block-start (pos)
+  "Return the start of the blank-line-delimited block around POS."
   (save-excursion
-    (goto-char (min (max beg (point-min)) (point-max)))
+    (goto-char (min (max pos (point-min)) (point-max)))
     (beginning-of-line)
     (while (and (> (point) (point-min))
                 (save-excursion
                   (forward-line -1)
                   (not (looking-at-p "[ \t]*$"))))
       (forward-line -1))
-    (let ((block-beg (point)))
+    (point)))
+
+(defun md-ts--blank-line-delimited-block-bounds (beg end)
+  "Return line bounds of the blank-line-delimited block around BEG..END.
+Lines containing only whitespace delimit blocks.  The scan stops at
+the enclosing delimiters, so even pathological inputs stay cheap."
+  (save-excursion
+    (let ((block-beg (md-ts--blank-line-delimited-block-start beg)))
       (goto-char (min (max end (point-min)) (point-max)))
       (end-of-line)
       (while (and (< (point) (point-max))
@@ -2220,8 +2232,39 @@ false negatives would skip needed whole-buffer flushes."
                md-ts--link-structure-line-regexp
                (buffer-substring-no-properties block-beg block-end))))))))
 
+(defun md-ts--edit-reach-start (beg end)
+  "Return the first position an edit of BEG..END can restructure.
+Block structure before a blank line does not depend on the text after
+it, so an edit only affects text from the blank-line-delimited block
+around it onwards.  Every link reference definition has \"]:\" right
+after its label and never spans a blank line, so when no \"]:\" follows
+this position the edit cannot change any definition.  Front matter is
+the exception: its closing delimiter reshapes everything above it, so
+in a buffer that may open with front matter the reach starts at the
+buffer start."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (goto-char (point-min))
+      (if (looking-at-p "---\\|\\+\\+\\+")
+          (point-min)
+        (md-ts--blank-line-delimited-block-start
+         (car (md-ts--broadened-line-bounds beg end)))))))
+
+(defun md-ts--definition-text-from-p (pos)
+  "Return non-nil if text from POS on could hold a reference definition."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (goto-char pos)
+      (search-forward "]:" nil t))))
+
 (defun md-ts--before-change-check-link-reference-definition (beg end)
   "Remember if the text from BEG to END can affect definitions."
+  (setq md-ts--definition-free-edit
+        (unless (md-ts--definition-text-from-p
+                 (md-ts--edit-reach-start beg end))
+          (cons (buffer-chars-modified-tick) (buffer-size))))
   (if (not (md-ts--region-could-change-link-structure-p beg end))
       (setq md-ts--link-reference-definition-change-p nil)
     (let ((newline-delete (md-ts--region-contains-newline-p beg end)))
@@ -2236,13 +2279,22 @@ false negatives would skip needed whole-buffer flushes."
                      (md-ts--node-in-link-reference-definition-p
                       (md-ts--node-at (1- end) 'markdown))))))))
 
-(defun md-ts--after-change-flush-link-reference-links (beg end _length)
+(defun md-ts--after-change-flush-link-reference-links (beg end length)
   "Flush non-local link fontification after definition edits.
-BEG, END, and _LENGTH are the standard `after-change-functions'
+BEG, END, and LENGTH are the standard `after-change-functions'
 arguments.  Reference definitions affect buttons and `help-echo'
 far from the edited line, so real definition or fence changes flush
-all font-lock state."
-  (let ((newline-insert (md-ts--region-contains-newline-p beg end)))
+all font-lock state.  An edit no definition text followed before or
+after it only flushes from `md-ts--edit-reach-start' and keeps the
+reference definitions cache.  Change hooks need not run in pairs, so
+the recorded state only counts if its size matches this very edit."
+  (let* ((newline-insert (md-ts--region-contains-newline-p beg end))
+         (reach (md-ts--edit-reach-start beg end))
+         (recorded md-ts--definition-free-edit)
+         (definition-free
+          (and recorded
+               (= (buffer-size) (+ (cdr recorded) (- end beg) (- length)))
+               (not (md-ts--definition-text-from-p reach)))))
     (when (or md-ts--link-reference-definition-change-p
               (and (md-ts--region-could-change-link-structure-p beg end)
                    (or (md-ts--region-has-link-reference-definition-node-p
@@ -2253,9 +2305,17 @@ all font-lock state."
       (save-restriction
         (widen)
         (md-ts--font-lock-push-dirty-side-effect-bounds
-         (point-min) (point-max)))
-      (md-ts--flush-all-font-lock)))
-  (setq md-ts--link-reference-definition-change-p nil))
+         (if definition-free reach (point-min)) (point-max))
+        (if definition-free
+            (font-lock-flush reach (point-max))
+          (md-ts--flush-all-font-lock))))
+    (when (and definition-free
+               (equal md-ts--link-reference-definitions-cache-tick
+                      (car recorded)))
+      (setq md-ts--link-reference-definitions-cache-tick
+            (buffer-chars-modified-tick))))
+  (setq md-ts--link-reference-definition-change-p nil
+        md-ts--definition-free-edit nil))
 
 (defconst md-ts--link-button-residual-properties
   '(md-ts-link-button nil md-ts-link-help-echo nil

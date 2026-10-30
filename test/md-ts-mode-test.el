@@ -2268,25 +2268,223 @@ b.md")))
     (should (equal (nreverse opened)
                    '("https://old.example" "https://new.example")))))
 
-(ert-deftest md-ts-test-link-reference-cache-rebuilds-after-unrelated-edit ()
-  "Any text edit should invalidate the reference cache by buffer tick."
-  (let ((buf (md-ts-test--fontify
-              "See [Doc][id].\n\n[id]: https://cached.example\n")))
+(defconst md-ts-test--reference-text
+  "See [Doc][id].\n\n[id]: https://cached.example\n\nTail paragraph.\n"
+  "A reference link, its definition and a final unrelated paragraph.")
+
+(defmacro md-ts-test--with-reference-cache (text &rest body)
+  "Run BODY in a fontified md-ts buffer of TEXT with a built cache."
+  (declare (indent 1) (debug t))
+  `(let ((buf (md-ts-test--fontify ,text)))
+     (unwind-protect
+         (with-current-buffer buf
+           (md-ts--link-reference-definitions)
+           ,@body)
+       (kill-buffer buf))))
+
+(defun md-ts-test--reference-cache-kept-p ()
+  "Return non-nil if the reference cache survived without a lookup."
+  (equal md-ts--link-reference-definitions-cache-tick
+         (buffer-chars-modified-tick)))
+
+(ert-deftest md-ts-test-link-reference-cache-survives-edit-after-definitions ()
+  "An edit no definition text follows keeps the reference cache."
+  ;; Rebuilding queries the whole buffer, so a transcript growing below its
+  ;; definitions would otherwise pay one whole-buffer query per append.
+  (md-ts-test--with-reference-cache md-ts-test--reference-text
+    (goto-char (point-max))
+    (insert "Streamed [link](https://x.example).\n")
+    (should (md-ts-test--reference-cache-kept-p))
+    (delete-char -1)
+    (should (md-ts-test--reference-cache-kept-p))
+    (should (equal (md-ts--resolve-link-reference "[id]")
+                   "https://cached.example"))))
+
+(ert-deftest md-ts-test-link-reference-cache-rebuilds-above-definitions ()
+  "An edit above a definition rebuilds even if no parsed check notices it."
+  ;; A list marker sets the content offset of later lines, so deleting it
+  ;; turns the definition below into indented code.
+  (md-ts-test--with-reference-cache
+      "See [foo].\n\n   - a\n\n       [foo]: /url\n\nEnd.\n"
+    (should (md-ts--resolve-link-reference "[foo]"))
+    (goto-char (point-min))
+    (search-forward "   - ")
+    (delete-region (match-beginning 0) (point))
+    (should-not (md-ts--resolve-link-reference "[foo]"))))
+
+(ert-deftest md-ts-test-link-reference-cache-follows-front-matter-delimiter ()
+  "A closing front matter delimiter changes definitions far above it."
+  ;; Front matter is the one block that blank lines do not delimit.
+  (dolist (delimiter '("---" "+++"))
+    (md-ts-test--with-reference-cache
+        (concat delimiter "\n\n[id]: /url\n\n\nTail.\n")
+      (should (md-ts--resolve-link-reference "[id]"))
+      (goto-char (point-max))
+      (insert delimiter "\n")
+      (should-not (md-ts--resolve-link-reference "[id]"))
+      (delete-char -4)
+      (should (md-ts--resolve-link-reference "[id]")))))
+
+(ert-deftest md-ts-test-link-reference-fence-after-definitions-keeps-cache ()
+  "A fence no definition text follows neither flushes nor drops the cache."
+  ;; A transcript that keeps appending fenced code would otherwise flush
+  ;; all font-lock per fence.
+  (let ((original-flush (symbol-function 'font-lock-flush))
+        (full-flushes 0))
+    (cl-letf (((symbol-function 'font-lock-flush)
+               (lambda (&optional beg end)
+                 (when (and (equal beg (point-min)) (equal end (point-max)))
+                   (cl-incf full-flushes))
+                 (funcall original-flush beg end))))
+      (md-ts-test--with-reference-cache md-ts-test--reference-text
+        (goto-char (point-max))
+        (insert "\n```sh\necho [a] b\n```\n\n<div>\nhtml\n</div>\n")
+        (should (md-ts-test--reference-cache-kept-p))
+        (should (= 0 full-flushes))))))
+
+(ert-deftest md-ts-test-link-reference-fence-inside-multiline-title ()
+  "A fence inside a definition's multi-line title still changes it."
+  ;; The definition's \"]:\" lies above the edited line, in the same block.
+  (md-ts-test--with-reference-cache
+      "See [x][foo].\n\n[foo]: /url 'one\ntwo'\n"
+    (goto-char (point-min))
+    (search-forward "two'")
+    (beginning-of-line)
+    (insert "```\n")
+    (should-not (md-ts-test--reference-cache-kept-p))))
+
+(ert-deftest md-ts-test-link-reference-fence-edit-refreshes-following-text ()
+  "A fence no definition text follows still refreshes the text after it."
+  ;; Closing a fence changes text several paragraphs below, which tree-sitter's
+  ;; changed ranges do not cover, so the flush from the edit onwards must.
+  (let ((buf (md-ts-test--fontify-jit
+              (concat "[id]: https://x.example\n\n```\ncode\n\n"
+                      "**bold**\n\nSee [Doc][id].\n"))))
     (unwind-protect
         (with-current-buffer buf
-          (let ((cache (md-ts--link-reference-definitions))
-                (tick md-ts--link-reference-definitions-cache-tick))
+          (cl-flet ((doc-button ()
+                      (font-lock-ensure)
+                      (goto-char (point-min))
+                      (search-forward "Doc")
+                      (button-at (match-beginning 0))))
+            (should-not (doc-button))
             (goto-char (point-min))
-            (insert "Intro line.\n")
-            (should (equal md-ts--link-reference-definitions-cache-tick
-                           tick))
-            (should-not (equal tick (buffer-chars-modified-tick)))
-            (should (equal (md-ts--resolve-link-reference "[id]")
-                           "https://cached.example"))
-            (should-not (eq cache md-ts--link-reference-definitions-cache))
-            (should (equal md-ts--link-reference-definitions-cache-tick
-                           (buffer-chars-modified-tick)))))
+            (search-forward "code\n")
+            (insert "```\n")
+            (should (doc-button))
+            (goto-char (point-min))
+            (search-forward "code\n")
+            (delete-char 4)
+            (should-not (doc-button))))
       (kill-buffer buf))))
+
+(ert-deftest md-ts-test-link-reference-cache-rebuilds-after-definition-edits ()
+  "Adding, changing and deleting a definition each rebuild the cache."
+  (md-ts-test--with-reference-cache md-ts-test--reference-text
+    (goto-char (point-max))
+    (insert "\n[new]: https://new.example\n")
+    (should (equal (md-ts--resolve-link-reference "[new]")
+                   "https://new.example"))
+    (goto-char (point-min))
+    (search-forward "cached")
+    (replace-match "changed" t t)
+    (should (equal (md-ts--resolve-link-reference "[id]")
+                   "https://changed.example"))
+    (goto-char (point-min))
+    (search-forward "[id]:")
+    (delete-region (line-beginning-position) (1+ (line-end-position)))
+    (should-not (md-ts--resolve-link-reference "[id]"))))
+
+(ert-deftest md-ts-test-link-reference-cache-rebuilds-after-unseen-edits ()
+  "Edits the change hooks never saw always rebuild the cache."
+  ;; Callers suspend md-ts change hooks for bulk edits (for example a chat
+  ;; frontend replaying history); a kept cache would then be stale.
+  (dolist (hide '(inhibit both before after))
+    (md-ts-test--with-reference-cache md-ts-test--reference-text
+      (let ((before-change-functions
+             (if (memq hide '(both before))
+                 (remq #'md-ts--before-change-check-link-reference-definition
+                       before-change-functions)
+               before-change-functions))
+            (after-change-functions
+             (if (memq hide '(both after))
+                 (remq #'md-ts--after-change-flush-link-reference-links
+                       after-change-functions)
+               after-change-functions))
+            (inhibit-modification-hooks (eq hide 'inhibit)))
+        (goto-char (point-max))
+        (insert "\n[hidden]: https://hidden.example\n"))
+      ;; A later ordinary edit must not carry the stale cache forward.
+      (goto-char (point-max))
+      (insert "\nStreamed line.\n")
+      (should (equal (md-ts--resolve-link-reference "[hidden]")
+                     "https://hidden.example")))))
+
+(ert-deftest md-ts-test-link-reference-cache-rejects-unpaired-change-state ()
+  "State recorded for one change cannot carry the cache over another."
+  ;; The first after-change hook and the second before-change hook are
+  ;; skipped, so the second after-change sees the first change's state.
+  (md-ts-test--with-reference-cache md-ts-test--reference-text
+    (let ((after-change-functions
+           (remq #'md-ts--after-change-flush-link-reference-links
+                 after-change-functions)))
+      (goto-char (point-max))
+      (insert "\n[first]: https://first.example\n\n\n"))
+    (let ((before-change-functions
+           (remq #'md-ts--before-change-check-link-reference-definition
+                 before-change-functions)))
+      (goto-char (point-max))
+      (insert "Streamed line.\n"))
+    (should (equal (md-ts--resolve-link-reference "[first]")
+                   "https://first.example"))))
+
+(ert-deftest md-ts-test-link-reference-cache-combined-change-calls ()
+  "A combined edit is judged once, over everything it changed."
+  (md-ts-test--with-reference-cache md-ts-test--reference-text
+    (let ((start (point-max)))
+      (combine-change-calls start start
+        (goto-char start)
+        (insert "First streamed line.\n")
+        (insert "Second streamed line.\n")))
+    (should (md-ts-test--reference-cache-kept-p))
+    (let ((start (point-max)))
+      (combine-change-calls start start
+        (goto-char start)
+        (insert "\n[late]: https://late.example\n")))
+    (should (equal (md-ts--resolve-link-reference "[late]")
+                   "https://late.example"))))
+
+(ert-deftest md-ts-test-link-reference-cache-narrowed-edits ()
+  "Edits under narrowing are judged against the whole buffer."
+  (md-ts-test--with-reference-cache md-ts-test--reference-text
+    (goto-char (point-min))
+    (search-forward "Tail")
+    (narrow-to-region (line-beginning-position) (point-max))
+    (goto-char (point-max))
+    (insert "Streamed line.\n")
+    (should (md-ts-test--reference-cache-kept-p))
+    (widen)
+    (goto-char (point-min))
+    (narrow-to-region (point-min) (line-end-position))
+    (goto-char (point-max))
+    (insert " Above.")
+    (should-not (md-ts-test--reference-cache-kept-p))))
+
+(ert-deftest md-ts-test-link-reference-cache-indirect-buffer-edits ()
+  "An edit made through one buffer rebuilds the other's cache."
+  ;; Change hooks run only in the buffer that edits shared text.
+  (md-ts-test--with-reference-cache md-ts-test--reference-text
+    (let ((indirect (make-indirect-buffer
+                     (current-buffer) " *md-ts-test-indirect*" t)))
+      (unwind-protect
+          (progn
+            (with-current-buffer indirect
+              (md-ts-mode)
+              (goto-char (point-max))
+              (insert "\n[shared]: https://shared.example\n"))
+            (should (equal (md-ts--resolve-link-reference "[shared]")
+                           "https://shared.example")))
+        (kill-buffer indirect)))))
 
 (ert-deftest md-ts-test-link-reference-cache-widens-before-rebuild ()
   "First cache rebuild while narrowed should not poison widening."
